@@ -13,9 +13,9 @@
     "IsTestingExclusive": "False",
     "DownloadCount": 0,
     "LastUpdate": 0,
-    "DownloadLinkInstall": "https://github.com/amatiramisu/mascaron/releases/download/0.1.0.0/Mascaron.zip",
-    "DownloadLinkUpdate": "https://github.com/amatiramisu/mascaron/releases/download/0.1.0.0/Mascaron.zip",
-    "DownloadLinkTesting": "https://github.com/amatiramisu/mascaron/releases/download/0.1.0.0/Mascaron.zip",
+    "DownloadLinkInstall": "https://github.com/amatiramisu/mascaron/releases/download/v0.1.0.0/Mascaron.zip",
+    "DownloadLinkUpdate": "https://github.com/amatiramisu/mascaron/releases/download/v0.1.0.0/Mascaron.zip",
+    "DownloadLinkTesting": "https://github.com/amatiramisu/mascaron/releases/download/v0.1.0.0/Mascaron.zip",
     "Tags": [
       "Customization",
       "Appearance",
