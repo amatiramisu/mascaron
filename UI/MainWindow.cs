@@ -104,6 +104,7 @@ public class MainWindow : Window
 
         sculptEngine.BrushRadius = configuration.BrushRadius;
         sculptEngine.FalloffCurve = (FalloffCurve)configuration.FalloffCurve;
+        sculptEngine.FalloffFactor = configuration.FalloffFactor;
         sculptEngine.TopologyEnabled = configuration.TopologyEnabled;
         sculptEngine.BrushEnabled = configuration.BrushEnabled;
     }
@@ -281,6 +282,14 @@ public class MainWindow : Window
         DrawCurveButton("Smooth", FalloffCurve.Smooth);
         ImGui.SameLine();
         DrawCurveButton("Sharp", FalloffCurve.Sharp);
+
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(80);
+        var falloff = sculptEngine.FalloffFactor * 100f;
+        if (ImGui.SliderFloat("##Spread", ref falloff, 0f, 100f, "%.0f%%"))
+            sculptEngine.FalloffFactor = falloff / 100f;
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Spread: 0% = only the dragged bone moves,\n100% = all brush-selected bones move equally.\nThe curve buttons control the gradient shape.");
 
         ImGui.SameLine();
         ImGui.Text("|");
@@ -479,10 +488,10 @@ public class MainWindow : Window
                         sculptEngine.ApplyDrag(draggedBone, moveDelta * TranslationScale, dragAffected);
                         break;
                     case SculptMode.Rotate:
-                        sculptEngine.ApplyRotation(draggedBone, delta2D * RotationScale, dragAffected);
+                        sculptEngine.ApplyRotation(draggedBone, delta2D * RotationScale, dragAffected, yawAxis: shiftHeld);
                         break;
                     case SculptMode.Scale:
-                        sculptEngine.ApplyScale(draggedBone, delta2D * ScaleScale, dragAffected);
+                        sculptEngine.ApplyScale(draggedBone, delta2D * ScaleScale, dragAffected, depthAxis: shiftHeld);
                         break;
                 }
                 dragStart = mousePos;
@@ -727,18 +736,28 @@ public class MainWindow : Window
 
         if (draggedBone != null)
         {
-            if (ImGui.GetIO().KeyShift)
-                ImGui.TextColored(dimColor, "Shift+Drag: Z depth  |  Release Shift: X/Y");
-            else
-                ImGui.TextColored(dimColor, "Drag: X/Y  |  Hold Shift: Z depth");
+            var shiftHint = activeMode switch
+            {
+                SculptMode.Move => ImGui.GetIO().KeyShift
+                    ? "Shift+Drag: Z depth  |  Release Shift: X/Y"
+                    : "Drag: X/Y  |  Hold Shift: Z depth",
+                SculptMode.Rotate => ImGui.GetIO().KeyShift
+                    ? "Shift+Drag: Yaw  |  Release Shift: Pitch/Roll"
+                    : "Drag: Pitch/Roll  |  Hold Shift: Yaw",
+                SculptMode.Scale => ImGui.GetIO().KeyShift
+                    ? "Shift+Drag: Z scale  |  Release Shift: X/Y scale"
+                    : "Drag: X/Y scale  |  Hold Shift: Z scale",
+                _ => string.Empty,
+            };
+            ImGui.TextColored(dimColor, shiftHint);
         }
         else if (sculptEngine.BrushEnabled)
         {
-            ImGui.TextColored(dimColor, "Scroll: Brush size  |  Ctrl+Scroll: Zoom  |  Right-drag: Pan  |  Shift+Drag: Z depth");
+            ImGui.TextColored(dimColor, "Scroll: Brush size  |  Ctrl+Scroll: Zoom  |  Right-drag: Pan  |  Shift+Drag: Axis toggle");
         }
         else
         {
-            ImGui.TextColored(dimColor, "Scroll: Zoom  |  Right-drag: Pan  |  Shift+Drag: Z depth  |  Double right-click: Reset view");
+            ImGui.TextColored(dimColor, "Scroll: Zoom  |  Right-drag: Pan  |  Shift+Drag: Axis toggle  |  Double right-click: Reset view");
         }
     }
 

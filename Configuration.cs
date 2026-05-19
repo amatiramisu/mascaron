@@ -8,7 +8,7 @@ public class Configuration : IPluginConfiguration
 {
     public int Version { get; set; } = 0;
 
-    public float FalloffFactor { get; set; } = 0.75f;
+    public float FalloffFactor { get; set; } = 0f;
     public bool MirrorEnabled { get; set; } = true;
     public float WindowOpacity { get; set; } = 0.85f;
     public float BrushRadius { get; set; } = 80f;

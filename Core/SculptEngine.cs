@@ -14,7 +14,7 @@ public class SculptEngine
     private readonly TopologyGraph topology;
     private readonly BoneTransformState state;
 
-    public float FalloffFactor { get; set; } = 0.75f;
+    public float FalloffFactor { get; set; } = 0f;
     public bool MirrorEnabled { get; set; } = true;
     public bool TopologyEnabled { get; set; }
     public FalloffCurve FalloffCurve { get; set; } = FalloffCurve.Smooth;
@@ -34,13 +34,14 @@ public class SculptEngine
     public float ComputeFalloff(float normalizedDistance)
     {
         var t = Math.Clamp(normalizedDistance, 0f, 1f);
-        return FalloffCurve switch
+        var curved = FalloffCurve switch
         {
             FalloffCurve.Linear => 1f - t,
             FalloffCurve.Smooth => (MathF.Cos(t * MathF.PI) + 1f) * 0.5f,
             FalloffCurve.Sharp => MathF.Pow(1f - t, 3f),
             _ => 1f - t,
         };
+        return curved * (1f - FalloffFactor) + FalloffFactor;
     }
 
     public void ApplyDrag(string boneName, Vector3 delta, IReadOnlyList<(string Codename, float Strength)> affected)
@@ -60,15 +61,19 @@ public class SculptEngine
         }
     }
 
-    public void ApplyRotation(string boneName, Vector2 delta, IReadOnlyList<(string Codename, float Strength)> affected)
+    public void ApplyRotation(string boneName, Vector2 delta, IReadOnlyList<(string Codename, float Strength)> affected, bool yawAxis = false)
     {
-        var rotDelta = new Vector3(delta.Y, 0, delta.X);
+        var rotDelta = yawAxis
+            ? new Vector3(0, delta.X, 0)
+            : new Vector3(delta.Y, 0, delta.X);
         foreach (var (code, strength) in affected)
             ApplyRotationToBone(code, rotDelta, strength);
 
         if (MirrorEnabled)
         {
-            var mirrorDelta = new Vector3(rotDelta.X, rotDelta.Y, -rotDelta.Z);
+            var mirrorDelta = yawAxis
+                ? new Vector3(0, -rotDelta.Y, 0)
+                : new Vector3(rotDelta.X, rotDelta.Y, -rotDelta.Z);
             foreach (var (code, strength) in affected)
             {
                 var mirror = topology.GetMirror(code);
@@ -78,9 +83,11 @@ public class SculptEngine
         }
     }
 
-    public void ApplyScale(string boneName, Vector2 delta, IReadOnlyList<(string Codename, float Strength)> affected)
+    public void ApplyScale(string boneName, Vector2 delta, IReadOnlyList<(string Codename, float Strength)> affected, bool depthAxis = false)
     {
-        var baseDelta = new Vector3(delta.X, delta.Y, (delta.X + delta.Y) * 0.5f);
+        var baseDelta = depthAxis
+            ? new Vector3(0, 0, -delta.Y)
+            : new Vector3(delta.X, delta.Y, (delta.X + delta.Y) * 0.5f);
         foreach (var (code, strength) in affected)
         {
             var scaleFactor = Vector3.One + baseDelta * strength;
