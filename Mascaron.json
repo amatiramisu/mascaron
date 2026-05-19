@@ -1,0 +1,9 @@
+{
+  "Author": "amatiramisu",
+  "Name": "Mascaron",
+  "Punchline": "Allows you to sculpt and export your face to C+ in a comfortable way.",
+  "Description": "Visual face bone sculpting with brush tools, mirroring, and direct Customize+ import/export.",
+  "InternalName": "Mascaron",
+  "ApplicableVersion": "any",
+  "Tags": ["Customization", "Appearance", "Character", "Face"]
+}
