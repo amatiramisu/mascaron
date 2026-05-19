@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      DALAMUD_HOME: /tmp/dalamud
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Extract version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$version" >> $GITHUB_ENV
+
+      - name: Download Dalamud
+        run: |
+          wget -q https://goatcorp.github.io/dalamud-distrib/latest.zip -O /tmp/dalamud.zip
+          unzip -q /tmp/dalamud.zip -d /tmp/dalamud
+
+      - name: Build
+        run: |
+          dotnet build -c Release --nologo \
+            -p:Version=${{ env.VERSION }} \
+            -p:AssemblyVersion=${{ env.VERSION }}
+
+      - name: Package
+        run: |
+          cd bin/Release
+          zip -r Mascaron.zip Mascaron.dll Mascaron.json Mascaron.deps.json Assets/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: bin/Release/Mascaron.zip
+          fail_on_unmatched_files: true
+
+      - name: Update repo.json
+        run: |
+          jq --arg v "${{ env.VERSION }}" \
+             --arg url "${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/Mascaron.zip" \
+             '.[0].AssemblyVersion = $v |
+              .[0].DownloadLinkInstall = $url |
+              .[0].DownloadLinkUpdate = $url |
+              .[0].DownloadLinkTesting = $url' \
+             repo.json > tmp.json && mv tmp.json repo.json
+
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git add repo.json
+          git commit -m "Update repo.json for ${{ github.ref_name }}"
+          git push origin HEAD:main
