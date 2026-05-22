@@ -5,6 +5,7 @@ public class TopologyGraph
     private readonly Dictionary<string, List<string>> children = new();
     private readonly Dictionary<string, string?> parents = new();
     private readonly Dictionary<string, string?> mirrors = new();
+    private readonly Dictionary<string, string?> linkedBones = new();
     private readonly Dictionary<string, HashSet<string>> reachableSets = new();
 
     public TopologyGraph(FaceBone[] bones)
@@ -13,6 +14,12 @@ public class TopologyGraph
         {
             parents[bone.Codename] = bone.Parent;
             mirrors[bone.Codename] = bone.Mirror;
+            linkedBones[bone.Codename] = bone.Codename switch
+            {
+                "j_f_eyepuru_l" => "j_f_eyepuru_r",
+                "j_f_eyepuru_r" => "j_f_eyepuru_l",
+                _ => null,
+            };
 
             if (bone.Parent != null)
             {
@@ -29,6 +36,8 @@ public class TopologyGraph
     public string? GetParent(string codename) => parents.GetValueOrDefault(codename);
 
     public string? GetMirror(string codename) => mirrors.GetValueOrDefault(codename);
+
+    public string? GetLinkedBone(string codename) => linkedBones.GetValueOrDefault(codename);
 
     public IReadOnlyList<string> GetChildren(string codename)
     {

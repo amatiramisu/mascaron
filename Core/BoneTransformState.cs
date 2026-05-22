@@ -24,12 +24,9 @@ public struct BoneTransform
 public class BoneTransformState
 {
     private readonly Dictionary<string, BoneTransform> transforms = new();
-    private readonly List<Dictionary<string, BoneTransform>> undoStack = new();
-    private const int MaxUndoLevels = 50;
     private int version;
 
     public int Version => version;
-    public bool CanUndo => undoStack.Count > 0;
 
     public BoneTransform Get(string codename)
     {
@@ -48,30 +45,22 @@ public class BoneTransformState
         version++;
     }
 
-    public void PushUndo()
-    {
-        if (undoStack.Count >= MaxUndoLevels)
-            undoStack.RemoveAt(0);
-        undoStack.Add(new Dictionary<string, BoneTransform>(transforms));
-    }
-
-    public void Undo()
-    {
-        if (undoStack.Count == 0)
-            return;
-
-        var snapshot = undoStack[^1];
-        undoStack.RemoveAt(undoStack.Count - 1);
-        transforms.Clear();
-        foreach (var (k, v) in snapshot)
-            transforms[k] = v;
-        version++;
-    }
-
     public void ResetAll()
     {
         transforms.Clear();
-        undoStack.Clear();
+        version++;
+    }
+
+    public Dictionary<string, BoneTransform> CreateSnapshot()
+    {
+        return new Dictionary<string, BoneTransform>(transforms);
+    }
+
+    public void RestoreSnapshot(IReadOnlyDictionary<string, BoneTransform> snapshot)
+    {
+        transforms.Clear();
+        foreach (var (boneName, transform) in snapshot)
+            transforms[boneName] = transform;
         version++;
     }
 

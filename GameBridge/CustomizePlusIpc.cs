@@ -70,7 +70,7 @@ public class CustomizePlusIpc
         var state = new BoneTransformState();
         foreach (var (boneName, value) in bonesObj)
         {
-            if (FaceBoneRegistry.GetByCodename(boneName) == null)
+            if (!FaceBoneRegistry.IsSculptable(boneName))
                 continue;
 
             if (value is not JObject boneObj)

@@ -10,6 +10,7 @@ public class Configuration : IPluginConfiguration
 
     public float FalloffFactor { get; set; } = 0f;
     public bool MirrorEnabled { get; set; } = true;
+    public bool LinkEyesEnabled { get; set; } = true;
     public float WindowOpacity { get; set; } = 0.85f;
     public float BrushRadius { get; set; } = 80f;
     public int FalloffCurve { get; set; } = 1;

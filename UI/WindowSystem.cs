@@ -10,13 +10,15 @@ public sealed class MascaronWindowSystem : IDisposable
 
     public Window MainWindow { get; }
 
-    public MascaronWindowSystem(IDalamudPluginInterface pluginInterface, Window mainWindow)
+    public MascaronWindowSystem(IDalamudPluginInterface pluginInterface, Window mainWindow, params Window[] windows)
     {
         this.pluginInterface = pluginInterface;
         MainWindow = mainWindow;
 
         system = new WindowSystem("Mascaron");
         system.AddWindow(mainWindow);
+        foreach (var window in windows)
+            system.AddWindow(window);
 
         pluginInterface.UiBuilder.Draw += system.Draw;
         pluginInterface.UiBuilder.OpenMainUi += OnOpenMainUi;

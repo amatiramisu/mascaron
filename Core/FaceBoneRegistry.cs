@@ -21,7 +21,8 @@ public record FaceBone(
     BoneRegion Region,
     string? Parent,
     string? Mirror,
-    Vector2 CanvasPosition);
+    Vector2 CanvasPosition,
+    bool IsSculptable = true);
 
 public static class FaceBoneRegistry
 {
@@ -40,6 +41,16 @@ public static class FaceBoneRegistry
         return ByCodename.GetValueOrDefault(codename);
     }
 
+    public static bool IsSculptable(string codename)
+    {
+        return ByCodename.TryGetValue(codename, out var bone) && bone.IsSculptable;
+    }
+
+    public static BoneRegion? GetRegion(string codename)
+    {
+        return ByCodename.TryGetValue(codename, out var bone) ? bone.Region : null;
+    }
+
     private static FaceBone[] BuildRegistry()
     {
         // Dawntrail face skeleton — positions normalized to [0,1] on a 600x600 canvas.
@@ -47,10 +58,10 @@ public static class FaceBoneRegistry
         return
         [
             // Eyes
-            B("j_f_eye_l", "Eye Left", BoneRegion.Eyes, "j_f_face", "j_f_eye_r", 0.35f, 0.38f),
-            B("j_f_eye_r", "Eye Right", BoneRegion.Eyes, "j_f_face", "j_f_eye_l", 0.65f, 0.38f),
-            B("j_f_mab_l", "Eye Socket Left", BoneRegion.Eyes, "j_f_face", "j_f_mab_r", 0.34f, 0.37f),
-            B("j_f_mab_r", "Eye Socket Right", BoneRegion.Eyes, "j_f_face", "j_f_mab_l", 0.66f, 0.37f),
+            B("j_f_eye_l", "Eye Left", BoneRegion.Eyes, "j_f_face", "j_f_eye_r", 0.35f, 0.38f, false),
+            B("j_f_eye_r", "Eye Right", BoneRegion.Eyes, "j_f_face", "j_f_eye_l", 0.65f, 0.38f, false),
+            B("j_f_mab_l", "Eye Socket Left", BoneRegion.Eyes, "j_f_face", "j_f_mab_r", 0.34f, 0.37f, false),
+            B("j_f_mab_r", "Eye Socket Right", BoneRegion.Eyes, "j_f_face", "j_f_mab_l", 0.66f, 0.37f, false),
             B("j_f_eyepuru_l", "Iris Left", BoneRegion.Eyes, "j_f_face", "j_f_eyepuru_r", 0.35f, 0.39f),
             B("j_f_eyepuru_r", "Iris Right", BoneRegion.Eyes, "j_f_face", "j_f_eyepuru_l", 0.65f, 0.39f),
 
@@ -133,8 +144,8 @@ public static class FaceBoneRegistry
     }
 
     private static FaceBone B(string codename, string displayName, BoneRegion region,
-        string? parent, string? mirror, float x, float y)
+        string? parent, string? mirror, float x, float y, bool isSculptable = true)
     {
-        return new FaceBone(codename, displayName, region, parent, mirror, new Vector2(x, y));
+        return new FaceBone(codename, displayName, region, parent, mirror, new Vector2(x, y), isSculptable);
     }
 }

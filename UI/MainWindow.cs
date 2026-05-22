@@ -25,15 +25,23 @@ public class MainWindow : Window
     private readonly ITextureProvider textureProvider;
     private readonly string assetsPath;
     private readonly Configuration configuration;
+    private readonly SculptStrokeHistory strokeHistory;
+    private readonly Action toggleHistoryWindow;
+    private readonly Func<bool> historyWindowIsOpen;
 
     private string? draggedBone;
     private string? hoveredBone;
     private Vector2 dragStart;
-    private List<(string Codename, float Strength)>? dragAffected;
+    private SculptStroke? activeStroke;
+    private bool activeStrokeRegistered;
+    private bool leftDragGestureActive;
 
     private string? cachedBrushBone;
     private Vector2 cachedBrushPos;
     private float cachedBrushRadius;
+    private float cachedBrushInfluence;
+    private FalloffCurve cachedBrushCurve;
+    private bool cachedBrushRegionLock;
     private List<(string Codename, float Strength)> cachedBrushResult = [];
 
     private string statusMessage = string.Empty;
@@ -45,7 +53,6 @@ public class MainWindow : Window
 
     private SculptMode activeMode = SculptMode.Move;
     private bool edgeResizeWasEnabled;
-    private float measuredMinWidth;
     private float canvasZoom = 1.0f;
     private Vector2 canvasScroll = Vector2.Zero;
     private float lastViewportSize;
@@ -67,6 +74,7 @@ public class MainWindow : Window
 
         activeTemplate = template;
         transformState.ResetAll();
+        ClearStrokeState();
         loadedBackgroundTemplate = (FaceTemplate)(-1);
         SetStatus($"Race changed — now sculpting {RaceTemplates.GetRaceName(race)}.");
     }
@@ -78,12 +86,15 @@ public class MainWindow : Window
         CustomizePlusIpc cplusIpc,
         Configuration configuration,
         ITextureProvider textureProvider,
-        IDalamudPluginInterface pluginInterface)
+        IDalamudPluginInterface pluginInterface,
+        SculptStrokeHistory strokeHistory,
+        Action toggleHistoryWindow,
+        Func<bool> historyWindowIsOpen)
         : base("Mascaron###MascaronMain", ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
         SizeConstraints = new WindowSizeConstraints
         {
-            MinimumSize = new Vector2(200, 200),
+            MinimumSize = new Vector2(260, 320),
             MaximumSize = new Vector2(1200, 1200),
         };
 
@@ -92,6 +103,9 @@ public class MainWindow : Window
         this.fileFormat = fileFormat;
         this.cplusIpc = cplusIpc;
         this.configuration = configuration;
+        this.strokeHistory = strokeHistory;
+        this.toggleHistoryWindow = toggleHistoryWindow;
+        this.historyWindowIsOpen = historyWindowIsOpen;
         this.textureProvider = textureProvider;
         assetsPath = Path.Combine(pluginInterface.AssemblyLocation.Directory!.FullName, "Assets", "Faces");
         topology = new TopologyGraph(FaceBoneRegistry.Bones);
@@ -105,6 +119,7 @@ public class MainWindow : Window
         sculptEngine.BrushRadius = configuration.BrushRadius;
         sculptEngine.FalloffCurve = (FalloffCurve)configuration.FalloffCurve;
         sculptEngine.FalloffFactor = configuration.FalloffFactor;
+        sculptEngine.LinkEyesEnabled = configuration.LinkEyesEnabled;
         sculptEngine.TopologyEnabled = configuration.TopologyEnabled;
         sculptEngine.BrushEnabled = configuration.BrushEnabled;
     }
@@ -135,6 +150,7 @@ public class MainWindow : Window
 
         configuration.FalloffFactor = sculptEngine.FalloffFactor;
         configuration.MirrorEnabled = sculptEngine.MirrorEnabled;
+        configuration.LinkEyesEnabled = sculptEngine.LinkEyesEnabled;
         configuration.BrushRadius = sculptEngine.BrushRadius;
         configuration.FalloffCurve = (int)sculptEngine.FalloffCurve;
         configuration.TopologyEnabled = sculptEngine.TopologyEnabled;
@@ -145,22 +161,8 @@ public class MainWindow : Window
     public override void Draw()
     {
         DrawFileBar();
-        var fileBarWidth = ImGui.GetItemRectMax().X - ImGui.GetWindowPos().X;
         DrawSculptBar();
-        var sculptBarWidth = ImGui.GetItemRectMax().X - ImGui.GetWindowPos().X;
         ImGui.Separator();
-
-        var toolbarWidth = MathF.Max(fileBarWidth, sculptBarWidth) + ImGui.GetStyle().WindowPadding.X;
-        if (toolbarWidth != measuredMinWidth)
-        {
-            measuredMinWidth = toolbarWidth;
-            var toolbarHeight = ImGui.GetCursorPosY();
-            SizeConstraints = new WindowSizeConstraints
-            {
-                MinimumSize = new Vector2(measuredMinWidth, measuredMinWidth + toolbarHeight),
-                MaximumSize = new Vector2(1200, 1200),
-            };
-        }
 
         DrawCanvas();
 
@@ -192,6 +194,7 @@ public class MainWindow : Window
             {
                 case CustomizePlusIpc.ImportResult.Success:
                     transformState.ResetAll();
+                    ClearStrokeState();
                     foreach (var (bone, transform) in imported!.GetModified())
                         transformState.Set(bone, transform);
                     SetStatus($"Imported {imported.ModifiedCount} bone(s) from Customize+.");
@@ -235,22 +238,33 @@ public class MainWindow : Window
                 if (!ok)
                     return;
                 if (fileFormat.LoadInto(transformState, path))
+                {
+                    ClearStrokeState();
                     SetStatus($"Loaded {Path.GetFileName(path)}");
+                }
                 else
                     SetStatus("Failed to load — file malformed.");
             });
         }
 
         ImGui.SameLine();
-        ImGui.BeginDisabled(!transformState.CanUndo);
+        ImGui.BeginDisabled(!strokeHistory.HasStrokes);
         if (ImGui.Button("Undo"))
-            transformState.Undo();
+        {
+            if (strokeHistory.UndoLatest(transformState))
+            {
+                ClearActiveDragState();
+                if (strokeHistory.SelectedStroke is { } selectedStroke)
+                    sculptEngine.FalloffFactor = selectedStroke.Influence;
+            }
+        }
         ImGui.EndDisabled();
 
         ImGui.SameLine();
         if (ImGui.Button("Reset All"))
         {
             transformState.ResetAll();
+            ClearStrokeState();
             SetStatus("All bones reset.");
         }
 
@@ -260,6 +274,10 @@ public class MainWindow : Window
         if (ImGui.SliderFloat("Opacity", ref opacity, 0.2f, 1.0f, "%.2f"))
             configuration.WindowOpacity = opacity;
 
+        ImGui.SameLine();
+        DrawToggleButton("History", historyWindowIsOpen(), toggleHistoryWindow);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Show recent strokes for influence edits.");
     }
 
     private void DrawSculptBar()
@@ -287,24 +305,42 @@ public class MainWindow : Window
         ImGui.SetNextItemWidth(80);
         var falloff = sculptEngine.FalloffFactor * 100f;
         if (ImGui.SliderFloat("##Spread", ref falloff, 0f, 100f, "%.0f%%"))
+        {
             sculptEngine.FalloffFactor = falloff / 100f;
+            cachedBrushBone = null;
+            ApplyLastStrokeInfluence();
+        }
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Spread: 0% = only the dragged bone moves,\n100% = all brush-selected bones move equally.\nThe curve buttons control the gradient shape.");
+            ImGui.SetTooltip("Influence: 0% = only the dragged bone moves,\n100% = neighboring bones follow the selected curve.");
 
         ImGui.SameLine();
         ImGui.Text("|");
         ImGui.SameLine();
 
-        var topo = sculptEngine.TopologyEnabled;
-        if (ImGui.Checkbox("Region Lock", ref topo))
-            sculptEngine.TopologyEnabled = topo;
+        DrawToggleButton("Region Lock", sculptEngine.TopologyEnabled, () =>
+        {
+            sculptEngine.TopologyEnabled = !sculptEngine.TopologyEnabled;
+            cachedBrushBone = null;
+        });
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("When enabled, the brush only affects bones\nthat belong to the same facial region as\nthe bone you're dragging (e.g. dragging a\ncheek bone won't pull nearby eye bones).");
+            ImGui.SetTooltip("When enabled, the brush stays inside the\ndragged bone's facial region.");
 
         ImGui.SameLine();
-        var mirror = sculptEngine.MirrorEnabled;
-        if (ImGui.Checkbox("Mirror", ref mirror))
-            sculptEngine.MirrorEnabled = mirror;
+        DrawToggleButton("Mirror", sculptEngine.MirrorEnabled, () =>
+        {
+            sculptEngine.MirrorEnabled = !sculptEngine.MirrorEnabled;
+            cachedBrushBone = null;
+        });
+
+        ImGui.SameLine();
+        DrawToggleButton("Link Eyes", sculptEngine.LinkEyesEnabled, () =>
+        {
+            sculptEngine.LinkEyesEnabled = !sculptEngine.LinkEyesEnabled;
+            cachedBrushBone = null;
+        });
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Iris pairs receive matching deltas instead of mirrored axis flips.");
+
     }
 
     private void DrawToggleButton(string label, bool active, Action toggle)
@@ -330,7 +366,10 @@ public class MainWindow : Window
         else
         {
             if (ImGui.Button(label))
+            {
                 sculptEngine.FalloffCurve = curve;
+                cachedBrushBone = null;
+            }
         }
     }
 
@@ -386,7 +425,7 @@ public class MainWindow : Window
         drawList.PopClipRect();
     }
 
-    private const int BrushRings = 3;
+    private const int BrushGradientBands = 12;
 
     private void DrawBrushRing(ImDrawListPtr drawList)
     {
@@ -395,18 +434,18 @@ public class MainWindow : Window
         var r = sculptEngine.BrushRadius;
         var segments = Math.Max(24, (int)(r * 0.4f));
 
+        for (var i = BrushGradientBands; i >= 1; i--)
+        {
+            var t = (float)i / BrushGradientBands;
+            var ringRadius = r * t;
+            var strength = sculptEngine.ComputeFalloff(t);
+            var alpha = 0.02f + strength * 0.035f;
+            var color = ImGui.GetColorU32(new Vector4(1f, 0.72f, 0.28f, alpha));
+            drawList.AddCircleFilled(mousePos, ringRadius, color, segments);
+        }
+
         var outerColor = ImGui.GetColorU32(new Vector4(1f, 0.8f, 0.4f, 0.4f));
         drawList.AddCircle(mousePos, r, outerColor, segments, 1.0f);
-
-        for (int i = 1; i <= BrushRings; i++)
-        {
-            var t = (float)i / (BrushRings + 1);
-            var ringRadius = r * (1f - t);
-            var strength = sculptEngine.ComputeFalloff(1f - t);
-            var alpha = 0.15f + strength * 0.25f;
-            var color = ImGui.GetColorU32(new Vector4(1f, 0.8f, 0.4f, alpha));
-            drawList.AddCircle(mousePos, ringRadius, color, segments, 1.0f);
-        }
 
         var coreColor = ImGui.GetColorU32(new Vector4(1f, 0.8f, 0.4f, 0.5f));
         drawList.AddCircleFilled(mousePos, 3f, coreColor, 12);
@@ -461,19 +500,24 @@ public class MainWindow : Window
 
         Vector2? ScreenPos(string codename) => GetBoneScreenPosition(codename, offset, logicalSize);
 
-        if (mouseClicked && ImGui.IsItemHovered())
+        if (!mouseDown)
+            leftDragGestureActive = false;
+
+        if (mouseClicked && !leftDragGestureActive && draggedBone == null && activeStroke == null && ImGui.IsItemHovered())
         {
             var hit = HitTestBone(mousePos, offset, logicalSize);
             if (hit != null)
             {
-                transformState.PushUndo();
+                leftDragGestureActive = true;
                 draggedBone = hit;
                 dragStart = mousePos;
-                dragAffected = sculptEngine.ComputeAffectedBones(hit, ScreenPos, mousePos);
+                var affected = sculptEngine.ComputeStrokeAffectedBones(hit, ScreenPos, mousePos);
+                activeStroke = sculptEngine.CreateStroke(hit, ToStrokeKind(activeMode), affected);
+                activeStrokeRegistered = false;
             }
         }
 
-        if (draggedBone != null && dragAffected != null && mouseDown)
+        if (draggedBone != null && activeStroke != null && mouseDown)
         {
             var delta2D = mousePos - dragStart;
             if (delta2D.LengthSquared() > 0.1f)
@@ -485,15 +529,22 @@ public class MainWindow : Window
                         var moveDelta = shiftHeld
                             ? new Vector3(0, 0, -delta2D.Y)
                             : new Vector3(-delta2D.X, -delta2D.Y, 0);
-                        sculptEngine.ApplyDrag(draggedBone, moveDelta * TranslationScale, dragAffected);
+                        activeStroke.AddDelta(moveDelta * TranslationScale);
                         break;
                     case SculptMode.Rotate:
-                        sculptEngine.ApplyRotation(draggedBone, delta2D * RotationScale, dragAffected, yawAxis: shiftHeld);
+                        activeStroke.AddDelta(GetRotationDelta(delta2D, shiftHeld));
                         break;
                     case SculptMode.Scale:
-                        sculptEngine.ApplyScale(draggedBone, delta2D * ScaleScale, dragAffected, depthAxis: shiftHeld);
+                        activeStroke.AddDelta(GetScaleDelta(delta2D, shiftHeld));
                         break;
                 }
+                if (!activeStrokeRegistered)
+                {
+                    strokeHistory.Add(activeStroke, transformState);
+                    activeStrokeRegistered = true;
+                }
+                activeStroke.SetInfluence(sculptEngine.FalloffFactor);
+                activeStroke.ApplyTo(transformState);
                 dragStart = mousePos;
             }
         }
@@ -501,13 +552,63 @@ public class MainWindow : Window
         if (mouseReleased)
         {
             draggedBone = null;
-            dragAffected = null;
+            activeStroke = null;
+            activeStrokeRegistered = false;
         }
 
         if (ImGui.IsItemHovered() && draggedBone == null)
             hoveredBone = HitTestBone(mousePos, offset, logicalSize);
         else if (draggedBone == null)
             hoveredBone = null;
+    }
+
+    private static SculptStrokeKind ToStrokeKind(SculptMode mode)
+    {
+        return mode switch
+        {
+            SculptMode.Rotate => SculptStrokeKind.Rotate,
+            SculptMode.Scale => SculptStrokeKind.Scale,
+            _ => SculptStrokeKind.Move,
+        };
+    }
+
+    private static Vector3 GetRotationDelta(Vector2 delta, bool yawAxis)
+    {
+        return yawAxis
+            ? new Vector3(0, delta.X * RotationScale, 0)
+            : new Vector3(delta.Y * RotationScale, 0, delta.X * RotationScale);
+    }
+
+    private static Vector3 GetScaleDelta(Vector2 delta, bool depthAxis)
+    {
+        return depthAxis
+            ? new Vector3(0, 0, -delta.Y * ScaleScale)
+            : new Vector3(delta.X * ScaleScale, delta.Y * ScaleScale, (delta.X + delta.Y) * 0.5f * ScaleScale);
+    }
+
+    private void ApplyLastStrokeInfluence()
+    {
+        var selectedStroke = strokeHistory.SelectedStroke;
+        if (selectedStroke == null || selectedStroke == activeStroke)
+            return;
+
+        selectedStroke.SetInfluence(sculptEngine.FalloffFactor);
+        strokeHistory.Replay(transformState);
+    }
+
+    private void ClearStrokeState()
+    {
+        ClearActiveDragState();
+        strokeHistory.Clear();
+        cachedBrushBone = null;
+    }
+
+    private void ClearActiveDragState()
+    {
+        draggedBone = null;
+        activeStroke = null;
+        activeStrokeRegistered = false;
+        leftDragGestureActive = false;
     }
 
     private void DrawFaceBackground(ImDrawListPtr drawList, Vector2 offset, float logicalSize)
@@ -556,6 +657,9 @@ public class MainWindow : Window
 
         foreach (var bone in FaceBoneRegistry.Bones)
         {
+            if (!bone.IsSculptable)
+                continue;
+
             var screenPos = GetBoneScreenPosition(bone.Codename, offset, logicalSize);
             if (screenPos == null)
                 continue;
@@ -600,12 +704,17 @@ public class MainWindow : Window
     {
         var mousePos = ImGui.GetIO().MousePos;
         var brushBones = new Dictionary<string, float>();
+        var focusedStroke = GetFocusedStroke();
+        var focusedTargets = focusedStroke?.Targets.ToDictionary(x => x.Codename) ?? new Dictionary<string, SculptStrokeTarget>();
         var activeBone = draggedBone ?? hoveredBone;
         if (activeBone != null && sculptEngine.BrushEnabled)
         {
             var needsRecompute = activeBone != cachedBrushBone
                 || Vector2.DistanceSquared(mousePos, cachedBrushPos) > 4f
-                || sculptEngine.BrushRadius != cachedBrushRadius;
+                || sculptEngine.BrushRadius != cachedBrushRadius
+                || sculptEngine.FalloffFactor != cachedBrushInfluence
+                || sculptEngine.FalloffCurve != cachedBrushCurve
+                || sculptEngine.TopologyEnabled != cachedBrushRegionLock;
 
             if (needsRecompute)
             {
@@ -614,6 +723,9 @@ public class MainWindow : Window
                 cachedBrushBone = activeBone;
                 cachedBrushPos = mousePos;
                 cachedBrushRadius = sculptEngine.BrushRadius;
+                cachedBrushInfluence = sculptEngine.FalloffFactor;
+                cachedBrushCurve = sculptEngine.FalloffCurve;
+                cachedBrushRegionLock = sculptEngine.TopologyEnabled;
             }
 
             foreach (var (code, strength) in cachedBrushResult)
@@ -622,6 +734,9 @@ public class MainWindow : Window
 
         foreach (var bone in FaceBoneRegistry.Bones)
         {
+            if (!bone.IsSculptable)
+                continue;
+
             var screenPos = GetBoneScreenPosition(bone.Codename, offset, logicalSize);
             if (screenPos == null)
                 continue;
@@ -662,6 +777,19 @@ public class MainWindow : Window
             }
 
             drawList.AddCircleFilled(pos, radius, color);
+
+            if (focusedTargets.TryGetValue(bone.Codename, out var focusTarget) && focusedStroke != null)
+            {
+                var focusStrength = GetStrokeTargetStrength(focusedStroke, focusTarget);
+                var focusAlpha = 0.35f + 0.45f * focusStrength;
+                var focusColor = ImGui.GetColorU32(new Vector4(0.35f, 0.95f, 1.0f, focusAlpha));
+                var focusRadius = radius + 4.0f + focusStrength * 2.0f;
+                var thickness = focusTarget.IsPrimary ? 2.5f : 1.5f;
+
+                drawList.AddCircle(pos, focusRadius, focusColor, 24, thickness);
+                if (focusTarget.IsPrimary)
+                    drawList.AddCircle(pos, focusRadius + 3.0f, focusColor, 24, 1.0f);
+            }
         }
 
         if (activeBone != null)
@@ -679,12 +807,12 @@ public class MainWindow : Window
                     drawList.AddText(tooltipPos, textColor, bone.DisplayName);
 
                     var transform = transformState.Get(bone.Codename);
+                    var lineY = tooltipPos.Y + 16;
                     if (transform.IsModified)
                     {
                         var t = transform.Translation;
                         var r = transform.Rotation;
                         var s = transform.Scaling;
-                        var lineY = tooltipPos.Y + 16;
 
                         if (t != System.Numerics.Vector3.Zero)
                         {
@@ -699,11 +827,31 @@ public class MainWindow : Window
                         if (s != System.Numerics.Vector3.One)
                         {
                             drawList.AddText(new Vector2(tooltipPos.X, lineY), dimColor, $"S: {s.X:0.000} {s.Y:0.000} {s.Z:0.000}");
+                            lineY += 14;
                         }
+                    }
+
+                    if (focusedTargets.TryGetValue(bone.Codename, out var target) && focusedStroke != null)
+                    {
+                        var focusColor = ImGui.GetColorU32(new Vector4(0.35f, 0.95f, 1.0f, 0.85f));
+                        drawList.AddText(new Vector2(tooltipPos.X, lineY), focusColor, $"Stroke: {GetStrokeTargetStrength(focusedStroke, target) * 100f:0}%");
                     }
                 }
             }
         }
+    }
+
+    private SculptStroke? GetFocusedStroke()
+    {
+        if (!historyWindowIsOpen())
+            return null;
+
+        return strokeHistory.SelectedStroke;
+    }
+
+    private static float GetStrokeTargetStrength(SculptStroke stroke, SculptStrokeTarget target)
+    {
+        return target.IsPrimary ? 1f : target.Strength * stroke.Influence;
     }
 
     private void DrawStatusOverlay(ImDrawListPtr drawList, Vector2 canvasOrigin)

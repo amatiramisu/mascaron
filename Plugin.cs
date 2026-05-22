@@ -16,6 +16,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private readonly MascaronWindowSystem windowSystem;
     private readonly MainWindow mainWindow;
+    private readonly HistoryWindow historyWindow;
     private readonly BridgeSelector boneApplicator;
     private readonly BoneTransformState transformState;
     private readonly CharacterResolver characterResolver;
@@ -39,6 +40,7 @@ public sealed class Plugin : IDalamudPlugin
         {
             FalloffFactor = configuration.FalloffFactor,
             MirrorEnabled = configuration.MirrorEnabled,
+            LinkEyesEnabled = configuration.LinkEyesEnabled,
         };
 
         characterResolver = new CharacterResolver(objectTable);
@@ -47,8 +49,22 @@ public sealed class Plugin : IDalamudPlugin
         var fileFormat = new MascaronFileFormat();
         var cplusIpc = new CustomizePlusIpc(pluginInterface, objectTable, log);
 
-        mainWindow = new MainWindow(transformState, sculptEngine, fileFormat, cplusIpc, configuration, textureProvider, pluginInterface);
-        windowSystem = new MascaronWindowSystem(pluginInterface, mainWindow);
+        var strokeHistory = new SculptStrokeHistory();
+        HistoryWindow? historyWindowRef = null;
+        mainWindow = new MainWindow(
+            transformState,
+            sculptEngine,
+            fileFormat,
+            cplusIpc,
+            configuration,
+            textureProvider,
+            pluginInterface,
+            strokeHistory,
+            () => historyWindowRef?.ToggleOpen(),
+            () => historyWindowRef?.IsOpen == true);
+        historyWindow = new HistoryWindow(strokeHistory, sculptEngine, mainWindow);
+        historyWindowRef = historyWindow;
+        windowSystem = new MascaronWindowSystem(pluginInterface, mainWindow, historyWindow);
 
         framework.Update += OnFrameworkUpdate;
 
