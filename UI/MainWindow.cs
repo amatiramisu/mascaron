@@ -795,6 +795,12 @@ public class MainWindow : Window
 
             drawList.AddCircleFilled(pos, radius, color);
 
+            if (brushBones.TryGetValue(bone.Codename, out var brushStrength))
+            {
+                var brushColor = ImGui.GetColorU32(new Vector4(1.0f, 0.72f, 0.25f, 0.35f + 0.45f * brushStrength));
+                drawList.AddCircle(pos, radius + 3.0f + brushStrength * 2.0f, brushColor, 24, 1.0f + brushStrength);
+            }
+
             if (focusedTargets.TryGetValue(bone.Codename, out var focusTarget) && focusedStroke != null)
             {
                 var focusStrength = GetStrokeTargetStrength(focusedStroke, focusTarget);
