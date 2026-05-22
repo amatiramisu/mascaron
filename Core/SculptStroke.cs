@@ -12,6 +12,7 @@ public enum SculptStrokeKind
 public readonly record struct SculptStrokeTarget(
     string Codename,
     float Strength,
+    float NormalizedDistance,
     bool IsPrimary,
     bool IsMirrored,
     BoneTransform Baseline);
@@ -20,13 +21,14 @@ public class SculptStroke
 {
     private readonly List<SculptStrokeTarget> targets = [];
 
-    public SculptStroke(string primaryBone, SculptStrokeKind kind, IEnumerable<SculptStrokeTarget> targets, float influence, bool brushEnabled)
+    public SculptStroke(string primaryBone, SculptStrokeKind kind, IEnumerable<SculptStrokeTarget> targets, float influence, bool brushEnabled, FalloffCurve curve)
     {
         PrimaryBone = primaryBone;
         Kind = kind;
         this.targets.AddRange(targets);
         Influence = Math.Clamp(influence, 0f, 1f);
         BrushEnabled = brushEnabled;
+        Curve = curve;
     }
 
     public string PrimaryBone { get; }
@@ -34,6 +36,7 @@ public class SculptStroke
     public IReadOnlyList<SculptStrokeTarget> Targets => targets;
     public float Influence { get; private set; }
     public bool BrushEnabled { get; }
+    public FalloffCurve Curve { get; private set; }
     public Vector3 Delta { get; private set; }
 
     public void AddDelta(Vector3 delta)
@@ -46,11 +49,27 @@ public class SculptStroke
         Influence = Math.Clamp(influence, 0f, 1f);
     }
 
+    public void SetCurve(FalloffCurve curve)
+    {
+        Curve = curve;
+    }
+
+    public float GetTargetStrength(SculptStrokeTarget target)
+    {
+        if (target.IsPrimary)
+            return 1f;
+
+        if (BrushEnabled)
+            return SculptEngine.ComputeCurveFalloff(Curve, target.NormalizedDistance) * Influence;
+
+        return target.Strength * Influence;
+    }
+
     public void ApplyTo(BoneTransformState state)
     {
         foreach (var target in targets)
         {
-            var strength = target.IsPrimary ? 1f : target.Strength * Influence;
+            var strength = GetTargetStrength(target);
             var transform = target.Baseline;
 
             switch (Kind)
@@ -74,7 +93,7 @@ public class SculptStroke
     {
         foreach (var target in targets)
         {
-            var strength = target.IsPrimary ? 1f : target.Strength * Influence;
+            var strength = GetTargetStrength(target);
             var transform = state.Get(target.Codename);
 
             switch (Kind)

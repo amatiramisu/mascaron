@@ -79,6 +79,8 @@ public class HistoryWindow : Window
                 rowClicked = true;
                 strokeHistory.Select(i);
                 sculptEngine.FalloffFactor = stroke.Influence;
+                if (stroke.BrushEnabled)
+                    sculptEngine.FalloffCurve = stroke.Curve;
             }
         }
 
@@ -124,7 +126,7 @@ public class HistoryWindow : Window
     {
         var bone = FaceBoneRegistry.GetByCodename(stroke.PrimaryBone);
         var name = bone?.DisplayName ?? stroke.PrimaryBone;
-        var scope = stroke.BrushEnabled ? "Brush" : "Direct";
+        var scope = stroke.BrushEnabled ? $"Brush {stroke.Curve}" : "Direct";
         return $"{index + 1:00}  {scope}  {stroke.Kind}  {name}  {stroke.Influence * 100f:0}%  ({FormatStrokeDelta(stroke)})";
     }
 

@@ -369,6 +369,7 @@ public class MainWindow : Window
             {
                 sculptEngine.FalloffCurve = curve;
                 cachedBrushBone = null;
+                ApplySelectedStrokeCurve(curve);
             }
         }
     }
@@ -588,11 +589,27 @@ public class MainWindow : Window
 
     private void ApplyLastStrokeInfluence()
     {
+        if (!historyWindowIsOpen())
+            return;
+
         var selectedStroke = strokeHistory.SelectedStroke;
         if (selectedStroke == null || selectedStroke == activeStroke)
             return;
 
         selectedStroke.SetInfluence(sculptEngine.FalloffFactor);
+        strokeHistory.Replay(transformState);
+    }
+
+    private void ApplySelectedStrokeCurve(FalloffCurve curve)
+    {
+        if (!historyWindowIsOpen())
+            return;
+
+        var selectedStroke = strokeHistory.SelectedStroke;
+        if (selectedStroke == null || selectedStroke == activeStroke || !selectedStroke.BrushEnabled)
+            return;
+
+        selectedStroke.SetCurve(curve);
         strokeHistory.Replay(transformState);
     }
 
@@ -851,7 +868,7 @@ public class MainWindow : Window
 
     private static float GetStrokeTargetStrength(SculptStroke stroke, SculptStrokeTarget target)
     {
-        return target.IsPrimary ? 1f : target.Strength * stroke.Influence;
+        return stroke.GetTargetStrength(target);
     }
 
     private void DrawStatusOverlay(ImDrawListPtr drawList, Vector2 canvasOrigin)

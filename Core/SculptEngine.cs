@@ -34,13 +34,18 @@ public class SculptEngine
 
     public float ComputeFalloff(float normalizedDistance)
     {
-        return ComputeCurveFalloff(normalizedDistance) * FalloffFactor;
+        return ComputeCurveFalloff(FalloffCurve, normalizedDistance) * FalloffFactor;
     }
 
     public float ComputeCurveFalloff(float normalizedDistance)
     {
+        return ComputeCurveFalloff(FalloffCurve, normalizedDistance);
+    }
+
+    public static float ComputeCurveFalloff(FalloffCurve curve, float normalizedDistance)
+    {
         var t = Math.Clamp(normalizedDistance, 0f, 1f);
-        return FalloffCurve switch
+        return curve switch
         {
             FalloffCurve.Linear => 1f - t,
             FalloffCurve.Smooth => (MathF.Cos(t * MathF.PI) + 1f) * 0.5f,
@@ -52,12 +57,12 @@ public class SculptEngine
     public SculptStroke CreateStroke(
         string centerBone,
         SculptStrokeKind kind,
-        IReadOnlyList<(string Codename, float Strength)> affected)
+        IReadOnlyList<(string Codename, float Strength, float NormalizedDistance)> affected)
     {
         var affectedCodes = affected.Select(x => x.Codename).ToHashSet();
         var targets = new Dictionary<string, SculptStrokeTarget>();
 
-        void AddTarget(string codename, float strength, bool isPrimary, bool isMirrored)
+        void AddTarget(string codename, float strength, float normalizedDistance, bool isPrimary, bool isMirrored)
         {
             var baseline = state.Get(codename);
             if (targets.TryGetValue(codename, out var existing))
@@ -65,22 +70,23 @@ public class SculptEngine
                 targets[codename] = existing with
                 {
                     Strength = MathF.Max(existing.Strength, strength),
+                    NormalizedDistance = MathF.Min(existing.NormalizedDistance, normalizedDistance),
                     IsPrimary = existing.IsPrimary || isPrimary,
                 };
                 return;
             }
 
-            targets[codename] = new SculptStrokeTarget(codename, strength, isPrimary, isMirrored, baseline);
+            targets[codename] = new SculptStrokeTarget(codename, strength, normalizedDistance, isPrimary, isMirrored, baseline);
         }
 
-        foreach (var (code, strength) in affected)
+        foreach (var (code, strength, normalizedDistance) in affected)
         {
             var isPrimary = code == centerBone;
-            AddTarget(code, strength, isPrimary, false);
+            AddTarget(code, strength, normalizedDistance, isPrimary, false);
 
             var linked = topology.GetLinkedBone(code);
             if (LinkEyesEnabled && linked != null && (isPrimary || !affectedCodes.Contains(linked)))
-                AddTarget(linked, strength, isPrimary, false);
+                AddTarget(linked, strength, normalizedDistance, isPrimary, false);
 
             if (MirrorEnabled)
             {
@@ -89,11 +95,11 @@ public class SculptEngine
 
                 var mirror = topology.GetMirror(code);
                 if (mirror != null && !affectedCodes.Contains(mirror))
-                    AddTarget(mirror, strength, isPrimary, true);
+                    AddTarget(mirror, strength, normalizedDistance, isPrimary, true);
             }
         }
 
-        return new SculptStroke(centerBone, kind, targets.Values, FalloffFactor, BrushEnabled);
+        return new SculptStroke(centerBone, kind, targets.Values, FalloffFactor, BrushEnabled, FalloffCurve);
     }
 
     public List<(string Codename, float Strength)> ComputeAffectedBones(
@@ -137,19 +143,19 @@ public class SculptEngine
         return result;
     }
 
-    public List<(string Codename, float Strength)> ComputeStrokeAffectedBones(
+    public List<(string Codename, float Strength, float NormalizedDistance)> ComputeStrokeAffectedBones(
         string centerBone,
         Func<string, Vector2?> getScreenPos,
         Vector2 cursorPos)
     {
-        var result = new List<(string, float)>();
+        var result = new List<(string, float, float)>();
         var centerPos = getScreenPos(centerBone);
         if (centerPos == null)
             return result;
 
         if (!BrushEnabled)
         {
-            result.Add((centerBone, 1f));
+            result.Add((centerBone, 1f, 0f));
             return result;
         }
 
@@ -170,9 +176,10 @@ public class SculptEngine
             if (TopologyEnabled && centerRegion != FaceBoneRegistry.GetRegion(bone.Codename))
                 continue;
 
-            var strength = bone.Codename == centerBone ? 1f : ComputeCurveFalloff(dist / BrushRadius);
+            var normalizedDistance = dist / BrushRadius;
+            var strength = bone.Codename == centerBone ? 1f : ComputeCurveFalloff(normalizedDistance);
             if (strength > 0.001f)
-                result.Add((bone.Codename, strength));
+                result.Add((bone.Codename, strength, normalizedDistance));
         }
 
         return result;
