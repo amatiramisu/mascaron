@@ -8,6 +8,7 @@ using Dalamud.Plugin.Services;
 using Mascaron.Core;
 using Mascaron.Export;
 using Mascaron.GameBridge;
+using Mascaron.Preview;
 using Mascaron.Visualization;
 
 namespace Mascaron.UI;
@@ -21,6 +22,7 @@ public class MainWindow : Window
     private readonly SculptEngine sculptEngine;
     private readonly MascaronFileFormat fileFormat;
     private readonly CustomizePlusIpc cplusIpc;
+    private readonly PreviewReconciler previewReconciler;
     private readonly FileDialogManager fileDialog = new();
     private readonly ITextureProvider textureProvider;
     private readonly string assetsPath;
@@ -74,6 +76,7 @@ public class MainWindow : Window
 
         activeTemplate = template;
         transformState.ResetAll();
+        previewReconciler.CancelHandoff();
         ClearStrokeState();
         loadedBackgroundTemplate = (FaceTemplate)(-1);
         SetStatus($"Race changed — now sculpting {RaceTemplates.GetRaceName(race)}.");
@@ -84,6 +87,7 @@ public class MainWindow : Window
         SculptEngine sculptEngine,
         MascaronFileFormat fileFormat,
         CustomizePlusIpc cplusIpc,
+        PreviewReconciler previewReconciler,
         Configuration configuration,
         ITextureProvider textureProvider,
         IDalamudPluginInterface pluginInterface,
@@ -102,6 +106,7 @@ public class MainWindow : Window
         this.sculptEngine = sculptEngine;
         this.fileFormat = fileFormat;
         this.cplusIpc = cplusIpc;
+        this.previewReconciler = previewReconciler;
         this.configuration = configuration;
         this.strokeHistory = strokeHistory;
         this.toggleHistoryWindow = toggleHistoryWindow;
@@ -178,6 +183,7 @@ public class MainWindow : Window
             {
                 var code = CustomizePlusCodec.Encode(transformState);
                 ImGui.SetClipboardText(code);
+                previewReconciler.BeginHandoff();
                 SetStatus("Share code copied to clipboard.");
             }
             else
@@ -197,6 +203,7 @@ public class MainWindow : Window
                     ClearStrokeState();
                     foreach (var (bone, transform) in imported!.GetModified())
                         transformState.Set(bone, transform);
+                    previewReconciler.AdoptImportedState(imported);
                     SetStatus($"Imported {imported.ModifiedCount} bone(s) from Customize+.");
                     break;
                 case CustomizePlusIpc.ImportResult.NoPlugin:
@@ -239,6 +246,7 @@ public class MainWindow : Window
                     return;
                 if (fileFormat.LoadInto(transformState, path))
                 {
+                    previewReconciler.CancelHandoff();
                     ClearStrokeState();
                     SetStatus($"Loaded {Path.GetFileName(path)}");
                 }
@@ -264,6 +272,7 @@ public class MainWindow : Window
         if (ImGui.Button("Reset All"))
         {
             transformState.ResetAll();
+            previewReconciler.CancelHandoff();
             ClearStrokeState();
             SetStatus("All bones reset.");
         }
@@ -879,14 +888,26 @@ public class MainWindow : Window
 
     private void DrawStatusOverlay(ImDrawListPtr drawList, Vector2 canvasOrigin)
     {
-        if (string.IsNullOrEmpty(statusMessage) || DateTime.UtcNow > statusExpiry)
+        var lineOffset = 6f;
+
+        if (!string.IsNullOrEmpty(statusMessage) && DateTime.UtcNow <= statusExpiry)
+        {
+            var remaining = (float)(statusExpiry - DateTime.UtcNow).TotalSeconds;
+            var alpha = Math.Clamp(remaining / 0.5f, 0f, 1f);
+            var color = ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 0.8f * alpha));
+            drawList.AddText(canvasOrigin + new Vector2(8, lineOffset), color, statusMessage);
+            lineOffset += ImGui.GetTextLineHeightWithSpacing();
+        }
+
+        var ownedBoneCount = previewReconciler.MascaronOwnedBoneCount;
+        if (ownedBoneCount == 0)
             return;
 
-        var remaining = (float)(statusExpiry - DateTime.UtcNow).TotalSeconds;
-        var alpha = Math.Clamp(remaining / 0.5f, 0f, 1f);
-        var color = ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 0.8f * alpha));
-        var pos = canvasOrigin + new Vector2(8, 6);
-        drawList.AddText(pos, color, statusMessage);
+        var handoffMessage = ownedBoneCount == 1
+            ? "One bone still answers to Mascaron."
+            : $"{ownedBoneCount} bones still answer to Mascaron.";
+        var handoffColor = ImGui.GetColorU32(new Vector4(1f, 0.42f, 0.34f, 0.95f));
+        drawList.AddText(canvasOrigin + new Vector2(8, lineOffset), handoffColor, handoffMessage);
     }
 
     private float GetHelpBarHeight()

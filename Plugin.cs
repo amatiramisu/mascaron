@@ -5,6 +5,7 @@ using Dalamud.Plugin.Services;
 using Mascaron.Core;
 using Mascaron.Export;
 using Mascaron.GameBridge;
+using Mascaron.Preview;
 using Mascaron.UI;
 using Mascaron.Visualization;
 
@@ -20,6 +21,8 @@ public sealed class Plugin : IDalamudPlugin
     private readonly BridgeSelector boneApplicator;
     private readonly BoneTransformState transformState;
     private readonly CharacterResolver characterResolver;
+    private readonly CustomizePlusIpc cplusIpc;
+    private readonly PreviewReconciler previewReconciler;
 
     public Plugin(
         IDalamudPluginInterface pluginInterface,
@@ -47,7 +50,8 @@ public sealed class Plugin : IDalamudPlugin
         boneApplicator = new BridgeSelector(pluginInterface, interop, sigScanner, objectTable, characterResolver, log);
 
         var fileFormat = new MascaronFileFormat();
-        var cplusIpc = new CustomizePlusIpc(pluginInterface, objectTable, log);
+        cplusIpc = new CustomizePlusIpc(pluginInterface, objectTable, log);
+        previewReconciler = new PreviewReconciler(transformState);
 
         var strokeHistory = new SculptStrokeHistory();
         HistoryWindow? historyWindowRef = null;
@@ -56,6 +60,7 @@ public sealed class Plugin : IDalamudPlugin
             sculptEngine,
             fileFormat,
             cplusIpc,
+            previewReconciler,
             configuration,
             textureProvider,
             pluginInterface,
@@ -86,6 +91,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         Framework.Update -= OnFrameworkUpdate;
         windowSystem.Dispose();
+        cplusIpc.Dispose();
         boneApplicator.Dispose();
         CommandManager.RemoveHandler(CommandName);
     }
@@ -101,7 +107,19 @@ public sealed class Plugin : IDalamudPlugin
         if (appearance.HasValue)
             mainWindow.SetTemplate(RaceTemplates.FromRace(appearance.Value.Race, appearance.Value.Tribe), appearance.Value.Race);
 
+        ReconcileCustomizePlusUpdate();
+
         if (boneApplicator.IsAvailable)
-            boneApplicator.Apply(transformState);
+            boneApplicator.Apply(previewReconciler.PreviewState);
+    }
+
+    private void ReconcileCustomizePlusUpdate()
+    {
+        if (!cplusIpc.TryDequeueLocalProfileUpdate(out var profileId))
+            return;
+
+        var (result, effectiveState) = cplusIpc.ReadProfile(profileId);
+        if (result == CustomizePlusIpc.ProfileReadResult.Success && effectiveState != null)
+            previewReconciler.ReconcileWith(effectiveState);
     }
 }
