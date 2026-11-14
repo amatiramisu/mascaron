@@ -9,34 +9,56 @@ public enum SculptStrokeKind
     Scale,
 }
 
-public readonly record struct SculptStrokeTarget(
-    string Codename,
-    float Strength,
-    float NormalizedDistance,
-    bool IsPrimary,
-    bool IsMirrored,
-    BoneTransform Baseline);
+/// <summary>
+/// Which transform a stroke builds on when it is applied.
+/// </summary>
+public enum StrokeBase
+{
+    /// <summary>The bone transforms captured when the stroke started (live dragging).</summary>
+    CapturedBaseline,
 
-public class SculptStroke
+    /// <summary>Whatever the state currently holds (history replay).</summary>
+    CurrentState,
+}
+
+/// <summary>
+/// A bone touched by a stroke, with the transform and model-space frame captured at stroke start.
+/// </summary>
+public readonly record struct SculptStrokeTarget(BrushInfluence Influence, BoneTransform Baseline, BoneFrame Frame)
+{
+    public string Codename => Influence.Codename;
+    public bool IsPrimary => Influence.Role != BrushRole.Falloff;
+}
+
+/// <summary>
+/// One drag gesture. Move is recorded in character model space (X = character left, Y = up, Z = forward)
+/// and converted per target into Customize+ bone-local translation. Rotate and Scale are recorded directly
+/// in Customize+ bone-local values (rotation degrees, scale offsets).
+/// </summary>
+public sealed class SculptStroke
 {
     private readonly List<SculptStrokeTarget> targets = [];
 
-    public SculptStroke(string primaryBone, SculptStrokeKind kind, IEnumerable<SculptStrokeTarget> targets, float influence, bool brushEnabled, FalloffCurve curve)
+    public SculptStroke(string primaryBone, SculptStrokeKind kind, float radius, IEnumerable<SculptStrokeTarget> targets)
     {
         PrimaryBone = primaryBone;
         Kind = kind;
+        Radius = ClampRadius(radius);
         this.targets.AddRange(targets);
-        Influence = Math.Clamp(influence, 0f, 1f);
-        BrushEnabled = brushEnabled;
-        Curve = curve;
+        PrimaryFrame = FindPrimaryFrame();
     }
 
     public string PrimaryBone { get; }
+
+    /// <summary>Model-space frame of the grabbed bone captured at stroke start; null when it is no target.</summary>
+    public BoneFrame? PrimaryFrame { get; }
     public SculptStrokeKind Kind { get; }
     public IReadOnlyList<SculptStrokeTarget> Targets => targets;
-    public float Influence { get; private set; }
-    public bool BrushEnabled { get; }
-    public FalloffCurve Curve { get; private set; }
+
+    /// <summary>Brush radius in face-normalized units; editable after the fact from history.</summary>
+    public float Radius { get; private set; }
+
+    /// <summary>Model-space translation (Move), Customize+ rotation degrees (Rotate) or per-axis scale offset (Scale).</summary>
     public Vector3 Delta { get; private set; }
 
     public void AddDelta(Vector3 delta)
@@ -44,82 +66,95 @@ public class SculptStroke
         Delta += delta;
     }
 
-    public void SetInfluence(float influence)
+    public void SetRadius(float radius)
     {
-        Influence = Math.Clamp(influence, 0f, 1f);
+        Radius = ClampRadius(radius);
     }
 
-    public void SetCurve(FalloffCurve curve)
+    public float GetTargetStrength(in SculptStrokeTarget target)
     {
-        Curve = curve;
+        return target.Influence.Evaluate(Radius).Strength;
     }
 
-    public float GetTargetStrength(SculptStrokeTarget target)
-    {
-        if (target.IsPrimary)
-            return 1f;
-
-        if (BrushEnabled)
-            return SculptEngine.ComputeCurveFalloff(Curve, target.NormalizedDistance) * Influence;
-
-        return target.Strength * Influence;
-    }
-
-    public void ApplyTo(BoneTransformState state)
+    public void Apply(BoneTransformState state, StrokeBase source)
     {
         foreach (var target in targets)
         {
-            var strength = GetTargetStrength(target);
-            var transform = target.Baseline;
+            var (strength, mirrored) = target.Influence.Evaluate(Radius);
+            if (strength <= 0f)
+                continue;
 
-            switch (Kind)
-            {
-                case SculptStrokeKind.Move:
-                    transform.Translation += GetMoveDelta(target) * strength;
-                    break;
-                case SculptStrokeKind.Rotate:
-                    transform.Rotation += GetRotationDelta(target) * strength;
-                    break;
-                case SculptStrokeKind.Scale:
-                    transform.Scaling *= Vector3.One + Delta * strength;
-                    break;
-            }
-
-            state.Set(target.Codename, transform);
+            var current = source == StrokeBase.CapturedBaseline ? target.Baseline : state.Get(target.Codename);
+            state.Set(target.Codename, ApplyToTarget(current, target.Frame, strength, mirrored));
         }
     }
 
-    public void ApplyToCurrent(BoneTransformState state)
+    private BoneTransform ApplyToTarget(BoneTransform transform, BoneFrame frame, float strength, bool mirrored)
+    {
+        switch (Kind)
+        {
+            case SculptStrokeKind.Move:
+            {
+                var modelDelta = (mirrored ? MirrorVector(Delta) : Delta) * strength;
+                var translationFrame = CustomizePlusTransformMath.GetTranslationFrame(frame.BoneToModel, transform.Rotation);
+                transform.Translation += Vector3.Transform(modelDelta, Quaternion.Inverse(translationFrame));
+                break;
+            }
+            case SculptStrokeKind.Rotate:
+            {
+                var rotationDelta = (mirrored ? MirrorRotationDegrees(Delta) : Delta) * strength;
+                transform.Rotation = CustomizePlusTransformMath.WrapAngles(transform.Rotation + rotationDelta);
+                break;
+            }
+            case SculptStrokeKind.Scale:
+            {
+                var axisFrame = CustomizePlusTransformMath.GetTranslationFrame(frame.BoneToModel, transform.Rotation);
+                transform.Scaling *= MapModelScaleToLocal(Delta * strength, axisFrame);
+                break;
+            }
+        }
+
+        return transform;
+    }
+
+    /// <summary>
+    /// Assigns each bone-local axis the model-axis scale offset it is most aligned with.
+    /// </summary>
+    private static Vector3 MapModelScaleToLocal(Vector3 modelOffset, Quaternion localToModel)
+    {
+        return new Vector3(
+            1f + PickAlignedComponent(Vector3.Transform(Vector3.UnitX, localToModel), modelOffset),
+            1f + PickAlignedComponent(Vector3.Transform(Vector3.UnitY, localToModel), modelOffset),
+            1f + PickAlignedComponent(Vector3.Transform(Vector3.UnitZ, localToModel), modelOffset));
+    }
+
+    private static float PickAlignedComponent(Vector3 axisInModel, Vector3 modelOffset)
+    {
+        var abs = Vector3.Abs(axisInModel);
+        if (abs.X >= abs.Y && abs.X >= abs.Z)
+            return modelOffset.X;
+        return abs.Y >= abs.Z ? modelOffset.Y : modelOffset.Z;
+    }
+
+    /// <summary>Reflection across the character's sagittal plane for a position delta.</summary>
+    private static Vector3 MirrorVector(Vector3 v) => new(-v.X, v.Y, v.Z);
+
+    /// <summary>
+    /// Mirror partner rotation with Customize+'s face bone reflection (BoneTransform.GetStandardReflection):
+    /// yaw (X) and pitch (Y) flip, roll (Z) carries over.
+    /// </summary>
+    private static Vector3 MirrorRotationDegrees(Vector3 v) => new(-v.X, -v.Y, v.Z);
+
+    private BoneFrame? FindPrimaryFrame()
     {
         foreach (var target in targets)
         {
-            var strength = GetTargetStrength(target);
-            var transform = state.Get(target.Codename);
-
-            switch (Kind)
-            {
-                case SculptStrokeKind.Move:
-                    transform.Translation += GetMoveDelta(target) * strength;
-                    break;
-                case SculptStrokeKind.Rotate:
-                    transform.Rotation += GetRotationDelta(target) * strength;
-                    break;
-                case SculptStrokeKind.Scale:
-                    transform.Scaling *= Vector3.One + Delta * strength;
-                    break;
-            }
-
-            state.Set(target.Codename, transform);
+            if (target.Codename == PrimaryBone)
+                return target.Frame;
         }
+
+        return null;
     }
 
-    private Vector3 GetMoveDelta(SculptStrokeTarget target)
-    {
-        return target.IsMirrored ? new Vector3(-Delta.X, Delta.Y, Delta.Z) : Delta;
-    }
-
-    private Vector3 GetRotationDelta(SculptStrokeTarget target)
-    {
-        return target.IsMirrored ? new Vector3(Delta.X, -Delta.Y, -Delta.Z) : Delta;
-    }
+    private static float ClampRadius(float radius) => Math.Clamp(radius, BrushInfluence.RadiusMin, BrushInfluence.RadiusMax);
 }

@@ -1,5 +1,9 @@
 namespace Mascaron.Core;
 
+/// <summary>
+/// Editable list of recent strokes on top of a base snapshot. Older strokes beyond the limit
+/// are baked into the base.
+/// </summary>
 public class SculptStrokeHistory
 {
     private const int MaxStrokes = 50;
@@ -41,11 +45,6 @@ public class SculptStrokeHistory
         selectedIndex = -1;
     }
 
-    public void SelectLatest()
-    {
-        selectedIndex = strokes.Count - 1;
-    }
-
     public void Clear()
     {
         strokes.Clear();
@@ -63,7 +62,7 @@ public class SculptStrokeHistory
 
         state.RestoreSnapshot(baseState);
         foreach (var stroke in strokes)
-            stroke.ApplyToCurrent(state);
+            stroke.Apply(state, StrokeBase.CurrentState);
 
         if (strokes.Count == 0)
             baseState.Clear();
@@ -78,14 +77,14 @@ public class SculptStrokeHistory
 
         state.RestoreSnapshot(baseState);
         foreach (var stroke in strokes)
-            stroke.ApplyToCurrent(state);
+            stroke.Apply(state, StrokeBase.CurrentState);
     }
 
     private void CompactOldestStroke()
     {
         var compacted = new BoneTransformState();
         compacted.RestoreSnapshot(baseState);
-        strokes[0].ApplyToCurrent(compacted);
+        strokes[0].Apply(compacted, StrokeBase.CurrentState);
         baseState = compacted.CreateSnapshot();
         strokes.RemoveAt(0);
         selectedIndex = Math.Max(0, selectedIndex - 1);

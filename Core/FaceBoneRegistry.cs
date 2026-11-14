@@ -15,6 +15,16 @@ public enum BoneRegion
     Hrothgar,
 }
 
+/// <summary>
+/// Half of the face a bone sits on. Character left is drawn on screen left of the canvas.
+/// </summary>
+public enum FaceSide
+{
+    Left,
+    Center,
+    Right,
+}
+
 public record FaceBone(
     string Codename,
     string DisplayName,
@@ -44,6 +54,17 @@ public static class FaceBoneRegistry
     public static bool IsSculptable(string codename)
     {
         return ByCodename.TryGetValue(codename, out var bone) && bone.IsSculptable;
+    }
+
+    /// <summary>
+    /// Members of a mirror pair are Left or Right by their suffix; bones without a partner are Center.
+    /// </summary>
+    public static FaceSide GetSide(string codename)
+    {
+        if (!ByCodename.TryGetValue(codename, out var bone) || bone.Mirror == null)
+            return FaceSide.Center;
+
+        return codename.EndsWith("_r", StringComparison.Ordinal) ? FaceSide.Right : FaceSide.Left;
     }
 
     public static BoneRegion? GetRegion(string codename)

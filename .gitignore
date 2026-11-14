@@ -3,3 +3,8 @@ obj/
 *.user
 *.suo
 .vs/
+DESIGN.md
+AGENTS.md
+CLAUDE.md
+.claude
+Tests/

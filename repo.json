@@ -2,8 +2,8 @@
   {
     "Author": "amatiramisu",
     "Name": "Mascaron",
-    "Description": "Visual face bone sculpting with brush tools, mirroring, and direct Customize+ import/export.",
-    "Punchline": "Allows you to sculpt and export your face to C+ in a comfortable way.",
+    "Description": "Sculpt your face visually. (and send it straight to Customize+)",
+    "Punchline": "Sculpt your face visually. (and send it straight to Customize+)",
     "InternalName": "Mascaron",
     "AssemblyVersion": "0.3.3.0",
     "RepoUrl": "https://github.com/amatiramisu/mascaron",

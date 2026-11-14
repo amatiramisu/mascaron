@@ -33,25 +33,28 @@ public class MascaronFileFormat
         File.WriteAllText(path, file.ToString(Formatting.Indented));
     }
 
-    public bool LoadInto(BoneTransformState state, string path)
+    /// <summary>
+    /// Reads a saved sculpt; returns null when the file is missing or malformed.
+    /// </summary>
+    public BoneTransformState? Load(string path)
     {
         if (!File.Exists(path))
-            return false;
+            return null;
 
         JObject obj;
         try
         {
             obj = JObject.Parse(File.ReadAllText(path));
         }
-        catch
+        catch (JsonException)
         {
-            return false;
+            return null;
         }
 
         if (obj["Bones"] is not JObject bonesObj)
-            return false;
+            return null;
 
-        state.ResetAll();
+        var state = new BoneTransformState();
         foreach (var (boneName, value) in bonesObj)
         {
             if (value is not JObject boneObj)
@@ -68,7 +71,7 @@ public class MascaronFileFormat
                 state.Set(boneName, transform);
         }
 
-        return true;
+        return state;
     }
 
     private static JObject VecToJson(Vector3 v) => new() { ["X"] = v.X, ["Y"] = v.Y, ["Z"] = v.Z };

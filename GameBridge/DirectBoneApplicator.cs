@@ -1,30 +1,34 @@
 using System.Numerics;
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
-using FFXIVClientStructs.FFXIV.Client.Graphics.Render;
 using FFXIVClientStructs.FFXIV.Client.Graphics.Scene;
-using FFXIVClientStructs.Havok.Animation.Rig;
 using FFXIVClientStructs.Havok.Common.Base.Math.QsTransform;
 using Mascaron.Core;
 
 namespace Mascaron.GameBridge;
 
-public unsafe class DirectBoneApplicator : IBoneApplicator
+/// <summary>
+/// Writes Mascaron's preview into the local player's model pose from the same render hook
+/// Customize+ uses, with Customize+'s transform math, and samples face bone frames for the editor.
+/// </summary>
+public sealed unsafe class DirectBoneApplicator : IBoneFrameSource, IDisposable
 {
     private const string RenderHookSignature = "E8 ?? ?? ?? ?? 48 81 C3 ?? ?? ?? ?? BF ?? ?? ?? ?? 33 ED";
     private const int TruePoseIndex = 0;
+    private const string LeftEyeBone = "j_f_eye_l";
+    private const string RightEyeBone = "j_f_eye_r";
 
     private delegate nint RenderDelegate(nint a1, nint a2, nint a3, int a4);
 
     private readonly CharacterResolver characterResolver;
     private readonly Hook<RenderDelegate>? renderHook;
     private readonly IPluginLog log;
+    private readonly SkeletonBoneIndex boneIndex = new();
+    private readonly List<(string Bone, BoneTransform Transform)> editedBones = [];
 
     private BoneTransformState? pendingState;
-    private Dictionary<string, (int PartialIndex, int BoneIndex)> boneIndexMap = new();
-    private int lastSkeletonHash;
-
-    public bool IsAvailable { get; private set; }
+    private int pendingVersion = -1;
+    private BoneFrameSnapshot? latestFrames;
 
     public DirectBoneApplicator(
         IGameInteropProvider interop,
@@ -45,13 +49,33 @@ public unsafe class DirectBoneApplicator : IBoneApplicator
         catch (Exception ex)
         {
             log.Error($"Failed to establish render hook: {ex}");
-            IsAvailable = false;
         }
     }
 
+    public bool IsAvailable { get; }
+
+    /// <summary>Samples face bone frames each render while true (the editor window is open).</summary>
+    public bool CaptureFrames { get; set; }
+
+    public BoneFrameSnapshot? LatestFrames => Volatile.Read(ref latestFrames);
+
+    /// <summary>
+    /// Sets the state written on every render. The edited-bone list is rebuilt when its version changes.
+    /// </summary>
     public void Apply(BoneTransformState state)
     {
+        if (ReferenceEquals(state, pendingState) && state.Version == pendingVersion)
+            return;
+
+        editedBones.Clear();
+        foreach (var (bone, transform) in state.GetModified())
+        {
+            if (CustomizePlusTransformMath.IsEdited(transform))
+                editedBones.Add((bone, transform));
+        }
+
         pendingState = state;
+        pendingVersion = state.Version;
     }
 
     public void Dispose()
@@ -64,7 +88,18 @@ public unsafe class DirectBoneApplicator : IBoneApplicator
     {
         try
         {
-            ApplyTransforms();
+            var cBase = characterResolver.GetLocalPlayerCharacterBase();
+            if (cBase != null && cBase->Skeleton != null)
+            {
+                boneIndex.Refresh(cBase);
+                if (CaptureFrames)
+                    Volatile.Write(ref latestFrames, SampleFrames(cBase));
+                WriteEditedBones(cBase);
+            }
+            else if (CaptureFrames)
+            {
+                Volatile.Write(ref latestFrames, null);
+            }
         }
         catch (Exception ex)
         {
@@ -74,93 +109,80 @@ public unsafe class DirectBoneApplicator : IBoneApplicator
         return renderHook!.Original(a1, a2, a3, a4);
     }
 
-    private void ApplyTransforms()
+    private void WriteEditedBones(CharacterBase* cBase)
     {
-        if (pendingState == null || pendingState.ModifiedCount == 0)
-            return;
-
-        var cBase = characterResolver.GetLocalPlayerCharacterBase();
-        if (cBase == null || cBase->Skeleton == null)
-            return;
-
-        RebuildIndexMapIfNeeded(cBase);
-
-        foreach (var (boneName, transform) in pendingState.GetModified())
+        foreach (var (bone, transform) in editedBones)
         {
-            if (!boneIndexMap.TryGetValue(boneName, out var indices))
+            var pose = TryGetModelPose(cBase, bone, out var index);
+            if (pose == null)
                 continue;
 
-            var partialSkeleton = &cBase->Skeleton->PartialSkeletons[indices.PartialIndex];
-            var pose = partialSkeleton->GetHavokPose(TruePoseIndex);
-            if (pose == null || pose->ModelInSync == 0)
-                continue;
+            ref var target = ref pose[index];
+            var translation = new Vector3(target.Translation.X, target.Translation.Y, target.Translation.Z);
+            var rotation = new Quaternion(target.Rotation.X, target.Rotation.Y, target.Rotation.Z, target.Rotation.W);
+            var scale = new Vector3(target.Scale.X, target.Scale.Y, target.Scale.Z);
 
-            if (indices.BoneIndex >= pose->ModelPose.Length)
-                continue;
+            CustomizePlusTransformMath.ApplyToModelPose(transform, ref translation, ref rotation, ref scale);
 
-            var currentTransform = pose->ModelPose[indices.BoneIndex];
-            currentTransform.Translation.X += transform.Translation.X;
-            currentTransform.Translation.Y += transform.Translation.Y;
-            currentTransform.Translation.Z += transform.Translation.Z;
-            currentTransform.Scale.X *= transform.Scaling.X;
-            currentTransform.Scale.Y *= transform.Scaling.Y;
-            currentTransform.Scale.Z *= transform.Scaling.Z;
-
-            if (transform.Rotation != System.Numerics.Vector3.Zero)
-            {
-                var euler = transform.Rotation * (MathF.PI / 180f);
-                var rot = Quaternion.CreateFromYawPitchRoll(euler.Y, euler.X, euler.Z);
-                var existing = new Quaternion(
-                    currentTransform.Rotation.X,
-                    currentTransform.Rotation.Y,
-                    currentTransform.Rotation.Z,
-                    currentTransform.Rotation.W);
-                var combined = Quaternion.Multiply(existing, rot);
-                currentTransform.Rotation.X = combined.X;
-                currentTransform.Rotation.Y = combined.Y;
-                currentTransform.Rotation.Z = combined.Z;
-                currentTransform.Rotation.W = combined.W;
-            }
-
-            pose->ModelPose.Data[indices.BoneIndex] = currentTransform;
+            target.Translation.X = translation.X;
+            target.Translation.Y = translation.Y;
+            target.Translation.Z = translation.Z;
+            target.Rotation.X = rotation.X;
+            target.Rotation.Y = rotation.Y;
+            target.Rotation.Z = rotation.Z;
+            target.Rotation.W = rotation.W;
+            target.Scale.X = scale.X;
+            target.Scale.Y = scale.Y;
+            target.Scale.Z = scale.Z;
         }
     }
 
-    private void RebuildIndexMapIfNeeded(CharacterBase* cBase)
+    private BoneFrameSnapshot? SampleFrames(CharacterBase* cBase)
     {
-        var hash = ComputeSkeletonHash(cBase);
-        if (hash == lastSkeletonHash)
-            return;
-
-        lastSkeletonHash = hash;
-        boneIndexMap.Clear();
-
-        for (var pIdx = 0; pIdx < cBase->Skeleton->PartialSkeletonCount; pIdx++)
+        var frames = new Dictionary<string, BoneFrame>(FaceBoneRegistry.Bones.Length);
+        foreach (var bone in FaceBoneRegistry.Bones)
         {
-            var pose = cBase->Skeleton->PartialSkeletons[pIdx].GetHavokPose(TruePoseIndex);
-            if (pose == null || pose->Skeleton == null)
-                continue;
-
-            for (var bIdx = 0; bIdx < pose->Skeleton->Bones.Length; bIdx++)
-            {
-                var name = pose->Skeleton->Bones[bIdx].Name.String;
-                if (name != null)
-                    boneIndexMap[name] = (pIdx, bIdx);
-            }
+            var pose = TryGetModelPose(cBase, bone.Codename, out var index);
+            if (pose != null)
+                frames[bone.Codename] = new BoneFrame(Quaternion.Normalize(ToQuaternion(pose[index])));
         }
 
-        log.Debug($"Rebuilt bone index map: {boneIndexMap.Count} bones across {cBase->Skeleton->PartialSkeletonCount} partials");
+        if (frames.Count == 0)
+            return null;
+
+        var leftEye = TryGetModelPose(cBase, LeftEyeBone, out var leftIndex);
+        var rightEye = TryGetModelPose(cBase, RightEyeBone, out var rightIndex);
+        var eyeDistance = leftEye != null && rightEye != null
+            ? Vector3.Distance(ToPosition(leftEye[leftIndex]), ToPosition(rightEye[rightIndex]))
+            : 0f;
+
+        return new BoneFrameSnapshot(frames, eyeDistance);
     }
 
-    private static int ComputeSkeletonHash(CharacterBase* cBase)
+    /// <summary>
+    /// Returns the model pose array holding <paramref name="bone"/> when it is in sync, else null.
+    /// </summary>
+    private hkQsTransformf* TryGetModelPose(CharacterBase* cBase, string bone, out int index)
     {
-        var hash = (int)cBase->Skeleton->PartialSkeletonCount;
-        for (var i = 0; i < cBase->Skeleton->PartialSkeletonCount; i++)
-        {
-            var pose = cBase->Skeleton->PartialSkeletons[i].GetHavokPose(TruePoseIndex);
-            if (pose != null && pose->Skeleton != null)
-                hash = HashCode.Combine(hash, pose->Skeleton->Bones.Length);
-        }
-        return hash;
+        index = 0;
+        if (!boneIndex.TryGet(bone, out var location))
+            return null;
+
+        var pose = cBase->Skeleton->PartialSkeletons[location.PartialIndex].GetHavokPose(TruePoseIndex);
+        if (pose == null || pose->ModelInSync == 0 || location.BoneIndex >= pose->ModelPose.Length)
+            return null;
+
+        index = location.BoneIndex;
+        return pose->ModelPose.Data;
+    }
+
+    private static Quaternion ToQuaternion(in hkQsTransformf transform)
+    {
+        return new Quaternion(transform.Rotation.X, transform.Rotation.Y, transform.Rotation.Z, transform.Rotation.W);
+    }
+
+    private static Vector3 ToPosition(in hkQsTransformf transform)
+    {
+        return new Vector3(transform.Translation.X, transform.Translation.Y, transform.Translation.Z);
     }
 }

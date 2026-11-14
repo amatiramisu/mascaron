@@ -1,133 +1,148 @@
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Utility;
 using Dalamud.Interface.Windowing;
 using Mascaron.Core;
 
 namespace Mascaron.UI;
 
+/// <summary>
+/// Recent strokes, docked to the right of the main window until the user moves it.
+/// Selecting a stroke highlights it on the canvas and exposes its brush radius for editing.
+/// </summary>
 public class HistoryWindow : Window
 {
-    private readonly SculptStrokeHistory strokeHistory;
-    private readonly SculptEngine sculptEngine;
-    private readonly Window anchor;
-    private Vector2? expectedAttachedPosition;
-    private Vector2? expectedAttachedSize;
-    private bool attachedToAnchor;
-
-    private const float Width = 340f;
+    private const float Width = 360f;
     private const float Gap = 8f;
 
-    public HistoryWindow(
-        SculptStrokeHistory strokeHistory,
-        SculptEngine sculptEngine,
-        Window anchor)
+    private readonly SculptSession session;
+    private readonly EditorState editor;
+    private readonly MainWindow anchor;
+    private Vector2? expectedPosition;
+    private bool docked = true;
+
+    public HistoryWindow(SculptSession session, EditorState editor, MainWindow anchor)
         : base("Mascaron History###MascaronHistory", ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoSavedSettings)
     {
-        this.strokeHistory = strokeHistory;
-        this.sculptEngine = sculptEngine;
+        this.session = session;
+        this.editor = editor;
         this.anchor = anchor;
 
         SizeConstraints = new WindowSizeConstraints
         {
             MinimumSize = new Vector2(260, 220),
-            MaximumSize = new Vector2(420, 1200),
+            MaximumSize = new Vector2(600, float.MaxValue),
         };
     }
 
-    public void ToggleOpen()
+    public override void PreOpenCheck()
     {
+        if (!editor.HistoryToggleRequested)
+            return;
+
+        editor.HistoryToggleRequested = false;
         IsOpen = !IsOpen;
         if (IsOpen)
-            attachedToAnchor = true;
+            docked = true;
     }
 
-    public override void PreDraw()
+    public override void OnOpen()
     {
-        if (attachedToAnchor && TryGetAttachedPlacement(out var position, out var size))
-        {
-            expectedAttachedPosition = position;
-            expectedAttachedSize = size;
-            Position = position;
-            Size = size;
-            ImGui.SetNextWindowPos(position, ImGuiCond.Always);
-            ImGui.SetNextWindowSize(size, ImGuiCond.Always);
-        }
+        editor.HistoryOpen = true;
     }
 
     public override void OnClose()
     {
+        editor.HistoryOpen = false;
+    }
+
+    public override void PreDraw()
+    {
+        if (!docked || !anchor.IsOpen || anchor.LastSize == Vector2.Zero)
+            return;
+
+        var position = anchor.LastPosition + new Vector2(anchor.LastSize.X + Gap * ImGuiHelpers.GlobalScale, 0f);
+        expectedPosition = position;
+        ImGui.SetNextWindowPos(position, ImGuiCond.Always);
+        ImGui.SetNextWindowSize(new Vector2(Width * ImGuiHelpers.GlobalScale, anchor.LastSize.Y), ImGuiCond.Always);
     }
 
     public override void Draw()
     {
-        if (!strokeHistory.HasStrokes)
+        UpdateDocking();
+
+        if (!session.History.HasStrokes)
         {
             ImGui.TextDisabled("No strokes yet.");
-            UpdateAttachmentState();
             return;
         }
 
-        var rowClicked = false;
-        ImGui.SetNextWindowContentSize(new Vector2(ImGui.GetContentRegionAvail().X, 0));
-        ImGui.BeginChild("##StrokeHistory", new Vector2(0, -ImGui.GetFrameHeightWithSpacing()), true);
-        for (var i = 0; i < strokeHistory.Strokes.Count; i++)
+        DrawSelectedStrokeEditor();
+        DrawStrokeList();
+
+        if (ImGui.Button("Clear History"))
+            session.History.Clear();
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Keep the current sculpt and forget the editable stroke history.");
+    }
+
+    private void DrawSelectedStrokeEditor()
+    {
+        var stroke = session.History.SelectedStroke;
+        if (stroke == null || stroke == session.ActiveStroke)
         {
-            var stroke = strokeHistory.Strokes[i];
-            var selected = i == strokeHistory.SelectedIndex;
-            if (ImGui.Selectable(GetStrokeLabel(i, stroke), selected))
+            ImGui.TextDisabled("Select a stroke to edit its brush radius.");
+            return;
+        }
+
+        var radius = stroke.Radius * 100f;
+        ImGui.SetNextItemWidth(-1f);
+        if (ImGui.SliderFloat("##StrokeRadius", ref radius, BrushInfluence.RadiusMin * 100f, BrushInfluence.RadiusMax * 100f,
+                radius <= BrushInfluence.RadiusMin * 100f ? "Radius: direct" : "Radius %.0f%%"))
+        {
+            stroke.SetRadius(radius / 100f);
+            session.ReplayHistory();
+        }
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Brush radius of the selected stroke, as a share of the face width.\nThe sculpt replays with the new radius.");
+    }
+
+    private void DrawStrokeList()
+    {
+        var rowClicked = false;
+        ImGui.BeginChild("##StrokeHistory", new Vector2(0, -ImGui.GetFrameHeightWithSpacing()), true);
+        for (var i = 0; i < session.History.Strokes.Count; i++)
+        {
+            var stroke = session.History.Strokes[i];
+            if (ImGui.Selectable(GetStrokeLabel(i, stroke), i == session.History.SelectedIndex))
             {
                 rowClicked = true;
-                strokeHistory.Select(i);
-                sculptEngine.FalloffFactor = stroke.Influence;
-                if (stroke.BrushEnabled)
-                    sculptEngine.FalloffCurve = stroke.Curve;
+                session.History.Select(i);
             }
         }
 
         if (ImGui.IsWindowHovered() && ImGui.IsMouseClicked(ImGuiMouseButton.Left) && !rowClicked)
-            strokeHistory.ClearSelection();
+            session.History.ClearSelection();
 
         ImGui.EndChild();
-
-        if (ImGui.Button("Clear History"))
-            strokeHistory.Clear();
-        if (ImGui.IsItemHovered())
-            ImGui.SetTooltip("Keep the current sculpted result and forget editable stroke history.");
-
-        UpdateAttachmentState();
     }
 
-    private bool TryGetAttachedPlacement(out Vector2 position, out Vector2 size)
+    private void UpdateDocking()
     {
-        if (anchor.Position is { } anchorPosition && anchor.Size is { } anchorSize)
-        {
-            position = anchorPosition + new Vector2(anchorSize.X + Gap, 0);
-            size = new Vector2(Width, anchorSize.Y);
-            return true;
-        }
-
-        position = Vector2.Zero;
-        size = Vector2.Zero;
-        return false;
-    }
-
-    private void UpdateAttachmentState()
-    {
-        if (!attachedToAnchor || expectedAttachedPosition == null || expectedAttachedSize == null)
+        if (!docked || expectedPosition == null)
             return;
 
-        var moved = Vector2.DistanceSquared(ImGui.GetWindowPos(), expectedAttachedPosition.Value) > 4f;
-        var resized = Vector2.DistanceSquared(ImGui.GetWindowSize(), expectedAttachedSize.Value) > 4f;
-        if ((moved || resized) && ImGui.IsMouseDragging(ImGuiMouseButton.Left))
-            attachedToAnchor = false;
+        var moved = Vector2.DistanceSquared(ImGui.GetWindowPos(), expectedPosition.Value) > 4f;
+        if (moved && ImGui.IsMouseDragging(ImGuiMouseButton.Left))
+            docked = false;
     }
 
     private static string GetStrokeLabel(int index, SculptStroke stroke)
     {
-        var bone = FaceBoneRegistry.GetByCodename(stroke.PrimaryBone);
-        var name = bone?.DisplayName ?? stroke.PrimaryBone;
-        var scope = stroke.BrushEnabled ? $"Brush {stroke.Curve}" : "Direct";
-        return $"{index + 1:00}  {scope}  {stroke.Kind}  {name}  {stroke.Influence * 100f:0}%  ({FormatStrokeDelta(stroke)})";
+        var name = FaceBoneRegistry.GetByCodename(stroke.PrimaryBone)?.DisplayName ?? stroke.PrimaryBone;
+        var scope = stroke.Radius <= BrushInfluence.RadiusMin ? "Direct" : $"Brush {stroke.Radius * 100f:0}%";
+        return $"{index + 1:00}  {stroke.Kind}  {name}  {scope}  ({FormatStrokeDelta(stroke)})";
     }
 
     private static string FormatStrokeDelta(SculptStroke stroke)
@@ -135,10 +150,10 @@ public class HistoryWindow : Window
         var d = stroke.Delta;
         return stroke.Kind switch
         {
-            SculptStrokeKind.Move => $"T{d.X:+0.000;-0.000} {d.Y:+0.000;-0.000} {d.Z:+0.000;-0.000}",
-            SculptStrokeKind.Rotate => $"R{d.X:+0.0;-0.0} {d.Y:+0.0;-0.0} {d.Z:+0.0;-0.0}",
-            SculptStrokeKind.Scale => $"S{1f + d.X:0.000} {1f + d.Y:0.000} {1f + d.Z:0.000}",
-            _ => "Identity",
+            SculptStrokeKind.Move => $"T {d.X:+0.0000;-0.0000} {d.Y:+0.0000;-0.0000} {d.Z:+0.0000;-0.0000}",
+            SculptStrokeKind.Rotate => $"R {d.X:+0.0;-0.0} {d.Y:+0.0;-0.0} {d.Z:+0.0;-0.0}",
+            SculptStrokeKind.Scale => $"S {1f + d.X:0.000} {1f + d.Y:0.000} {1f + d.Z:0.000}",
+            _ => string.Empty,
         };
     }
 }

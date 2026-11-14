@@ -6,32 +6,56 @@ namespace Mascaron;
 [Serializable]
 public class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 0;
+    private const int CurrentVersion = 1;
+    private static readonly TimeSpan SaveDelay = TimeSpan.FromSeconds(1);
 
-    public float FalloffFactor { get; set; } = 0f;
+    public int Version { get; set; } = CurrentVersion;
+
     public bool MirrorEnabled { get; set; } = true;
     public bool LinkEyesEnabled { get; set; } = true;
-    public float WindowOpacity { get; set; } = 0.85f;
-    public float BrushRadius { get; set; } = 80f;
-    public int FalloffCurve { get; set; } = 1;
-    public bool TopologyEnabled { get; set; }
-    public bool BrushEnabled { get; set; } = true;
+    public bool RegionLockEnabled { get; set; }
 
-    public float? WindowX { get; set; }
-    public float? WindowY { get; set; }
-    public float? WindowWidth { get; set; }
-    public float? WindowHeight { get; set; }
+    /// <summary>Brush radius in face-normalized canvas units.</summary>
+    public float BrushRadius { get; set; } = 0.13f;
+
+    /// <summary>Drag sensitivity slider position, 0 to 1 with 0.5 as the calibrated default.</summary>
+    public float Sensitivity { get; set; } = 0.5f;
+
+    public float BackgroundOpacity { get; set; } = 0.85f;
 
     [NonSerialized]
     private IDalamudPluginInterface? pluginInterface;
 
+    [NonSerialized]
+    private DateTime? pendingSaveAt;
+
     public void Initialize(IDalamudPluginInterface pi)
     {
         pluginInterface = pi;
+        if (Version >= CurrentVersion)
+            return;
+
+        // Version 0 stored the brush radius in screen pixels.
+        BrushRadius = 0.13f;
+        Version = CurrentVersion;
+        Save();
+    }
+
+    /// <summary>Schedules a save; repeated requests within the delay coalesce into one write.</summary>
+    public void RequestSave()
+    {
+        pendingSaveAt = DateTime.UtcNow + SaveDelay;
+    }
+
+    public void FlushPendingSave()
+    {
+        if (pendingSaveAt is { } due && DateTime.UtcNow >= due)
+            Save();
     }
 
     public void Save()
     {
+        pendingSaveAt = null;
         pluginInterface?.SavePluginConfig(this);
     }
 }

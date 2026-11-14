@@ -12,6 +12,10 @@ namespace Mascaron.GameBridge;
 
 public sealed class CustomizePlusIpc : IDisposable
 {
+    /// <summary>Customize+ IPC breaking version this client is written against.</summary>
+    private const int SupportedBreakingVersion = 6;
+
+    private readonly ICallGateSubscriber<(int, int)> getApiVersion;
     private readonly ICallGateSubscriber<ushort, (int, Guid?)> getActiveProfileId;
     private readonly ICallGateSubscriber<Guid, (int, string?)> getProfileById;
     private readonly ICallGateSubscriber<ushort, Guid, object?> profileUpdated;
@@ -23,14 +27,15 @@ public sealed class CustomizePlusIpc : IDisposable
     {
         this.objectTable = objectTable;
         this.log = log;
+        getApiVersion = pluginInterface.GetIpcSubscriber<(int, int)>("CustomizePlus.General.GetApiVersion");
         getActiveProfileId = pluginInterface.GetIpcSubscriber<ushort, (int, Guid?)>("CustomizePlus.Profile.GetActiveProfileIdOnCharacter");
         getProfileById = pluginInterface.GetIpcSubscriber<Guid, (int, string?)>("CustomizePlus.Profile.GetByUniqueId");
         profileUpdated = pluginInterface.GetIpcSubscriber<ushort, Guid, object?>("CustomizePlus.Profile.OnUpdate");
         profileUpdated.Subscribe(OnProfileUpdated);
     }
 
-    public enum ImportResult { Success, NoPlugin, NoProfile, NoFaceBones }
-    public enum ProfileReadResult { Success, NoPlugin, NoProfile }
+    public enum ImportResult { Success, NoPlugin, VersionMismatch, NoProfile, NoFaceBones }
+    public enum ProfileReadResult { Success, NoPlugin, VersionMismatch, NoProfile }
 
     public void Dispose()
     {
@@ -41,6 +46,10 @@ public sealed class CustomizePlusIpc : IDisposable
     {
         try
         {
+            var api = CheckApiVersion();
+            if (api != ProfileReadResult.Success)
+                return (api == ProfileReadResult.VersionMismatch ? ImportResult.VersionMismatch : ImportResult.NoPlugin, null);
+
             var localPlayer = objectTable.LocalPlayer;
             if (localPlayer == null)
                 return (ImportResult.NoProfile, null);
@@ -82,6 +91,10 @@ public sealed class CustomizePlusIpc : IDisposable
 
         try
         {
+            var api = CheckApiVersion();
+            if (api != ProfileReadResult.Success)
+                return (api, null);
+
             var (profileError, json) = getProfileById.InvokeFunc(profileId);
             if (profileError != 0 || string.IsNullOrEmpty(json))
                 return (ProfileReadResult.NoProfile, null);
@@ -121,6 +134,16 @@ public sealed class CustomizePlusIpc : IDisposable
         }
 
         return found;
+    }
+
+    private ProfileReadResult CheckApiVersion()
+    {
+        var (breaking, _) = getApiVersion.InvokeFunc();
+        if (breaking == SupportedBreakingVersion)
+            return ProfileReadResult.Success;
+
+        log.Warning($"Customize+ IPC breaking version {breaking} differs from supported {SupportedBreakingVersion}.");
+        return ProfileReadResult.VersionMismatch;
     }
 
     private void OnProfileUpdated(ushort objectIndex, Guid profileId)

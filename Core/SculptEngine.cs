@@ -2,29 +2,16 @@ using System.Numerics;
 
 namespace Mascaron.Core;
 
-public enum FalloffCurve
+/// <summary>
+/// Brush settings and stroke construction: decides which bones a gesture touches and how strongly.
+/// </summary>
+public sealed class SculptEngine
 {
-    Linear,
-    Smooth,
-    Sharp,
-}
+    private const float RadiusStepFactor = 0.12f;
 
-public class SculptEngine
-{
     private readonly TopologyGraph topology;
     private readonly BoneTransformState state;
-
-    public float FalloffFactor { get; set; } = 0f;
-    public bool MirrorEnabled { get; set; } = true;
-    public bool LinkEyesEnabled { get; set; } = true;
-    public bool TopologyEnabled { get; set; }
-    public FalloffCurve FalloffCurve { get; set; } = FalloffCurve.Smooth;
-    public float BrushRadius { get; set; } = 80f;
-    public bool BrushEnabled { get; set; } = true;
-
-    public const float BrushRadiusMin = 15f;
-    public const float BrushRadiusMax = 400f;
-    public const float BrushRadiusFactor = 0.12f;
+    private float brushRadius = 0.13f;
 
     public SculptEngine(TopologyGraph topology, BoneTransformState state)
     {
@@ -32,156 +19,96 @@ public class SculptEngine
         this.state = state;
     }
 
-    public float ComputeFalloff(float normalizedDistance)
+    public TopologyGraph Topology => topology;
+    public bool MirrorEnabled { get; set; } = true;
+    public bool LinkEyesEnabled { get; set; } = true;
+    public bool RegionLockEnabled { get; set; }
+
+    /// <summary>Brush radius in face-normalized canvas units.</summary>
+    public float BrushRadius
     {
-        return ComputeCurveFalloff(FalloffCurve, normalizedDistance) * FalloffFactor;
+        get => brushRadius;
+        set => brushRadius = Math.Clamp(value, BrushInfluence.RadiusMin, BrushInfluence.RadiusMax);
     }
 
-    public float ComputeCurveFalloff(float normalizedDistance)
+    public bool IsDirectMode => BrushRadius <= BrushInfluence.RadiusMin;
+
+    public void StepBrushRadius(float wheelSteps)
     {
-        return ComputeCurveFalloff(FalloffCurve, normalizedDistance);
+        BrushRadius *= MathF.Pow(1f + RadiusStepFactor, wheelSteps);
     }
 
-    public static float ComputeCurveFalloff(FalloffCurve curve, float normalizedDistance)
+    /// <summary>
+    /// Computes how each visible bone relates to a brush placed at <paramref name="brushCenter"/>
+    /// while <paramref name="primaryBone"/> is grabbed. Positions are face-normalized.
+    /// </summary>
+    public List<BrushInfluence> ComputeInfluence(
+        string primaryBone,
+        Vector2 brushCenter,
+        IReadOnlyDictionary<string, Vector2> bonePositions)
     {
-        var t = Math.Clamp(normalizedDistance, 0f, 1f);
-        return curve switch
+        var result = new List<BrushInfluence>();
+        if (!bonePositions.ContainsKey(primaryBone))
+            return result;
+
+        var linkedPrimary = LinkEyesEnabled ? topology.GetLinkedBone(primaryBone) : null;
+        var mirrorPrimary = MirrorEnabled && linkedPrimary == null ? topology.GetMirror(primaryBone) : null;
+        var primaryRegion = FaceBoneRegistry.GetRegion(primaryBone);
+
+        foreach (var (codename, position) in bonePositions)
         {
-            FalloffCurve.Linear => 1f - t,
-            FalloffCurve.Smooth => (MathF.Cos(t * MathF.PI) + 1f) * 0.5f,
-            FalloffCurve.Sharp => MathF.Pow(1f - t, 3f),
-            _ => 1f - t,
-        };
+            if (RegionLockEnabled && FaceBoneRegistry.GetRegion(codename) != primaryRegion)
+                continue;
+
+            var role = codename == primaryBone || codename == linkedPrimary
+                ? BrushRole.Primary
+                : codename == mirrorPrimary ? BrushRole.MirrorPrimary : BrushRole.Falloff;
+
+            var directDistance = Vector2.Distance(brushCenter, position);
+            var mirrorDistance = float.PositiveInfinity;
+
+            var linkedPartner = LinkEyesEnabled ? topology.GetLinkedBone(codename) : null;
+            if (linkedPartner != null)
+            {
+                if (bonePositions.TryGetValue(linkedPartner, out var partnerPosition))
+                    directDistance = MathF.Min(directDistance, Vector2.Distance(brushCenter, partnerPosition));
+            }
+            else if (MirrorEnabled && topology.GetMirror(codename) is { } mirror &&
+                     bonePositions.TryGetValue(mirror, out var mirrorPosition))
+            {
+                mirrorDistance = Vector2.Distance(brushCenter, mirrorPosition);
+            }
+
+            if (role == BrushRole.Falloff && MathF.Min(directDistance, mirrorDistance) >= BrushInfluence.RadiusMax)
+                continue;
+
+            result.Add(new BrushInfluence(codename, directDistance, mirrorDistance, role));
+        }
+
+        return result;
     }
 
-    public SculptStroke CreateStroke(
-        string centerBone,
+    /// <summary>
+    /// Starts a stroke on <paramref name="primaryBone"/>. Bones missing from the live skeleton are skipped;
+    /// returns null when the grabbed bone itself has no frame.
+    /// </summary>
+    public SculptStroke? CreateStroke(
+        string primaryBone,
         SculptStrokeKind kind,
-        IReadOnlyList<(string Codename, float Strength, float NormalizedDistance)> affected)
+        Vector2 brushCenter,
+        IReadOnlyDictionary<string, Vector2> bonePositions,
+        BoneFrameSnapshot frames)
     {
-        var affectedCodes = affected.Select(x => x.Codename).ToHashSet();
-        var targets = new Dictionary<string, SculptStrokeTarget>();
+        if (!frames.TryGet(primaryBone, out _))
+            return null;
 
-        void AddTarget(string codename, float strength, float normalizedDistance, bool isPrimary, bool isMirrored)
+        var targets = new List<SculptStrokeTarget>();
+        foreach (var influence in ComputeInfluence(primaryBone, brushCenter, bonePositions))
         {
-            var baseline = state.Get(codename);
-            if (targets.TryGetValue(codename, out var existing))
-            {
-                targets[codename] = existing with
-                {
-                    Strength = MathF.Max(existing.Strength, strength),
-                    NormalizedDistance = MathF.Min(existing.NormalizedDistance, normalizedDistance),
-                    IsPrimary = existing.IsPrimary || isPrimary,
-                };
-                return;
-            }
-
-            targets[codename] = new SculptStrokeTarget(codename, strength, normalizedDistance, isPrimary, isMirrored, baseline);
+            if (frames.TryGet(influence.Codename, out var frame))
+                targets.Add(new SculptStrokeTarget(influence, state.Get(influence.Codename), frame));
         }
 
-        foreach (var (code, strength, normalizedDistance) in affected)
-        {
-            var isPrimary = code == centerBone;
-            AddTarget(code, strength, normalizedDistance, isPrimary, false);
-
-            var linked = topology.GetLinkedBone(code);
-            if (LinkEyesEnabled && linked != null && (isPrimary || !affectedCodes.Contains(linked)))
-                AddTarget(linked, strength, normalizedDistance, isPrimary, false);
-
-            if (MirrorEnabled)
-            {
-                if (LinkEyesEnabled && linked != null)
-                    continue;
-
-                var mirror = topology.GetMirror(code);
-                if (mirror != null && !affectedCodes.Contains(mirror))
-                    AddTarget(mirror, strength, normalizedDistance, isPrimary, true);
-            }
-        }
-
-        return new SculptStroke(centerBone, kind, targets.Values, FalloffFactor, BrushEnabled, FalloffCurve);
-    }
-
-    public List<(string Codename, float Strength)> ComputeAffectedBones(
-        string centerBone,
-        Func<string, Vector2?> getScreenPos,
-        Vector2 cursorPos)
-    {
-        var result = new List<(string, float)>();
-        var centerPos = getScreenPos(centerBone);
-        if (centerPos == null)
-            return result;
-
-        if (!BrushEnabled)
-        {
-            result.Add((centerBone, 1f));
-            return result;
-        }
-
-        var centerRegion = FaceBoneRegistry.GetRegion(centerBone);
-        foreach (var bone in FaceBoneRegistry.Bones)
-        {
-            if (!bone.IsSculptable)
-                continue;
-
-            var pos = getScreenPos(bone.Codename);
-            if (pos == null)
-                continue;
-
-            var dist = Vector2.Distance(cursorPos, pos.Value);
-            if (dist > BrushRadius)
-                continue;
-
-            if (TopologyEnabled && centerRegion != FaceBoneRegistry.GetRegion(bone.Codename))
-                continue;
-
-            var strength = bone.Codename == centerBone ? 1f : ComputeFalloff(dist / BrushRadius);
-            if (strength > 0.001f)
-                result.Add((bone.Codename, strength));
-        }
-
-        return result;
-    }
-
-    public List<(string Codename, float Strength, float NormalizedDistance)> ComputeStrokeAffectedBones(
-        string centerBone,
-        Func<string, Vector2?> getScreenPos,
-        Vector2 cursorPos)
-    {
-        var result = new List<(string, float, float)>();
-        var centerPos = getScreenPos(centerBone);
-        if (centerPos == null)
-            return result;
-
-        if (!BrushEnabled)
-        {
-            result.Add((centerBone, 1f, 0f));
-            return result;
-        }
-
-        var centerRegion = FaceBoneRegistry.GetRegion(centerBone);
-        foreach (var bone in FaceBoneRegistry.Bones)
-        {
-            if (!bone.IsSculptable)
-                continue;
-
-            var pos = getScreenPos(bone.Codename);
-            if (pos == null)
-                continue;
-
-            var dist = Vector2.Distance(cursorPos, pos.Value);
-            if (dist > BrushRadius)
-                continue;
-
-            if (TopologyEnabled && centerRegion != FaceBoneRegistry.GetRegion(bone.Codename))
-                continue;
-
-            var normalizedDistance = dist / BrushRadius;
-            var strength = bone.Codename == centerBone ? 1f : ComputeCurveFalloff(normalizedDistance);
-            if (strength > 0.001f)
-                result.Add((bone.Codename, strength, normalizedDistance));
-        }
-
-        return result;
+        return new SculptStroke(primaryBone, kind, BrushRadius, targets);
     }
 }
